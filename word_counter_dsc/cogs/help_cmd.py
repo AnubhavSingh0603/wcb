@@ -25,7 +25,7 @@ class HelpCog(commands.Cog):
     async def help_(self, interaction: discord.Interaction):
         # ACK immediately so Discord never times out
         if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer(thinking=True)
 
         try:
             embed = discord.Embed(title="📚 WordCounter DSC — Help")
@@ -45,12 +45,12 @@ class HelpCog(commands.Cog):
                 inline=False
             )
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
 
         except Exception as e:
             # If anything goes wrong, don't let it silently timeout
             try:
-                await interaction.followup.send(f"❌ Help failed: `{type(e).__name__}` — {e}", ephemeral=True)
+                await interaction.followup.send(f"❌ Help failed: `{type(e).__name__}` — {e}")
             except Exception:
                 pass
 
