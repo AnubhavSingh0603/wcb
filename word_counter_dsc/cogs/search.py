@@ -86,7 +86,7 @@ class SearchCog(commands.Cog):
                         description=f"{user.mention} in {channel.mention}: **{total}**",
                         color=Theme.GOLD,
                     )
-                    return await interaction.response.send_message(embed=e, ephemeral=True)
+                    return await interaction.response.send_message(embed=e)
             else:
                 # keyword-set mode
                 kws = await self.bot.dbx.fetchall(
@@ -100,7 +100,7 @@ class SearchCog(commands.Cog):
                         "Add keywords with `/keyword add <word>` first.",
                         color=Theme.SLATE,
                     )
-                    return await interaction.response.send_message(embed=e, ephemeral=True)
+                    return await interaction.response.send_message(embed=e)
 
                 where = ["guild_id=?"]
                 params = [guild_id]
@@ -127,7 +127,7 @@ class SearchCog(commands.Cog):
 
         if not rows:
             e = base_embed("No data found", "Try a different scope or word.", color=Theme.SLATE)
-            return await interaction.response.send_message(embed=e, ephemeral=True)
+            return await interaction.response.send_message(embed=e)
 
         e = base_embed(title, color=Theme.BLUE)
         lines = []
@@ -148,7 +148,7 @@ class SearchCog(commands.Cog):
         if user:
             e.add_field(name="Scope", value=f"User: {user.mention}")
 
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message(embed=e)
 
     @discord.app_commands.command(
         name="top",
@@ -161,7 +161,7 @@ class SearchCog(commands.Cog):
         channel: discord.TextChannel | None = None,
         n: int = DEFAULT_TOP_N,
     ):
-        await self.search(interaction, word=word, user=None, channel=channel, n=n)
+        await self.search.callback(self, interaction, word=word, user=None, channel=channel, n=n)
 
 
 async def setup(bot: commands.Bot):
