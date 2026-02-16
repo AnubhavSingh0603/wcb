@@ -138,11 +138,11 @@ class ProfileCog(commands.Cog):
             embeds.append(e)
 
         view = PagedEmbedView(embeds, timeout=90, author_id=interaction.user.id)
-        await interaction.response.send_message(embed=embeds[0], view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embeds[0], view=view)
 
     @discord.app_commands.command(name="profile", description="Your profile")
     async def profile(self, interaction: discord.Interaction):
-        await self.userprofile(interaction, user=None)
+        await self.userprofile.callback(self, interaction, user=None)
 
 
 async def setup(bot: commands.Bot):
