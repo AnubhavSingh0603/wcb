@@ -85,7 +85,7 @@ class KeywordCog(commands.Cog):
                             INSERT INTO word_counts (guild_id, channel_id, user_id, word, count)
                             VALUES (?, ?, ?, ?, ?)
                             ON CONFLICT(guild_id, channel_id, user_id, word)
-                            DO UPDATE SET count = count + excluded.count
+                            DO UPDATE SET count = word_counts.count + excluded.count
                             """,
                             (guild.id, ch.id, msg.author.id, kw, int(delta)),
                         )
@@ -102,18 +102,6 @@ class KeywordCog(commands.Cog):
         if medals_cog:
             try:
                 await medals_cog.recompute_all_medals_for_keyword(guild.id, kw)
-            except Exception:
-                pass
-
-        if notify_ch is not None:
-            try:
-                await notify_ch.send(
-                    embed=base_embed(
-                        "Backfill complete",
-                        f"Keyword `{kw}` backfill finished. Scanned ~{scanned} messages; updated {counted_msgs} hits.",
-                        color=Theme.EMERALD,
-                    )
-                )
             except Exception:
                 pass
 
@@ -148,7 +136,7 @@ class KeywordCog(commands.Cog):
             f"Added `{kw}`. Auto-backfill has been queued (best-effort).",
             color=Theme.GOLD,
         )
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message(embed=e, ephemeral=False)
 
         # Background task (runs in-process)
         asyncio.create_task(
@@ -186,7 +174,7 @@ class KeywordCog(commands.Cog):
             f"Removed `{kw}`. Medal data will purge after **7 days** if not re-added. Raw word counts remain.",
             color=Theme.SLATE,
         )
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message(embed=e, ephemeral=False)
 
     @keyword.command(name="list", description="List keywords")
     async def list_(self, interaction: discord.Interaction):
@@ -200,7 +188,7 @@ class KeywordCog(commands.Cog):
             )
 
         if not rows:
-            return await interaction.response.send_message(embed=base_embed("📌 Keywords", "None", color=Theme.SLATE), ephemeral=True)
+            return await interaction.response.send_message(embed=base_embed("📌 Keywords", "None", color=Theme.SLATE), ephemeral=False)
 
         active = [kw for kw, removed_at in rows if not removed_at]
         removed = [kw for kw, removed_at in rows if removed_at]
@@ -212,7 +200,7 @@ class KeywordCog(commands.Cog):
             value=", ".join(f"`{k}`" for k in removed) or "None",
             inline=False,
         )
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message(embed=e, ephemeral=False)
 
 
 async def setup(bot: commands.Bot):
