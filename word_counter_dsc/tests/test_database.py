@@ -43,14 +43,14 @@ def run_database_tests():
             INSERT INTO word_counts (guild_id, channel_id, user_id, word, count)
             VALUES (1, 1, 1, 'hello', 1)
             ON CONFLICT(guild_id, channel_id, user_id, word)
-            DO UPDATE SET count = count + excluded.count
+            DO UPDATE SET count = word_counts.count + excluded.count
         """)
 
         await bot.dbx.execute("""
             INSERT INTO word_counts (guild_id, channel_id, user_id, word, count)
             VALUES (1, 1, 1, 'hello', 2)
             ON CONFLICT(guild_id, channel_id, user_id, word)
-            DO UPDATE SET count = count + excluded.count
+            DO UPDATE SET count = word_counts.count + excluded.count
         """)
 
         await bot.dbx.commit()
