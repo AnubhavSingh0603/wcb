@@ -41,9 +41,22 @@ DB_PATH = os.getenv("DB_PATH", "word_counts.db")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ------------------------
+# Defaults used by cogs
+# ------------------------
+DEFAULT_TOP_N = int(os.getenv("DEFAULT_TOP_N", "10"))
+
+# When a keyword is removed, keep medal rows for a short grace window before cleanup
+KEYWORD_REMOVAL_GRACE_SECONDS = int(os.getenv("KEYWORD_REMOVAL_GRACE_SECONDS", "600"))
+
+# ------------------------
 # Backfill controls
 # ------------------------
-AUTO_BACKFILL_ENABLED = os.getenv("AUTO_BACKFILL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+AUTO_BACKFILL_ENABLED = os.getenv("AUTO_BACKFILL_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 BACKFILL_LIMIT_PER_CHANNEL = int(os.getenv("BACKFILL_LIMIT_PER_CHANNEL", "200"))
 
 # ------------------------
@@ -63,11 +76,34 @@ EXTENSIONS = [
     "word_counter_dsc.cogs.medals",
     "word_counter_dsc.cogs.profile",
 ]
+
+# ------------------------
+# Medals (Knight / Nobility theme)
+# ------------------------
 # Medal thresholds: (min_count, tier_number, tier_title)
+# NOTE: The *display* name shown to users is "The {tier_title} of <keyword>"
 MEDAL_THRESHOLDS = [
-    (25, 1, "Squire"),
-    (100, 2, "Baron"),
-    (250, 3, "Count"),
-    (500, 4, "Duke"),
-    (1000, 5, "Prince"),
+    (10, 1, "Page"),
+    (25, 2, "Squire"),
+    (50, 3, "Knight"),
+    (100, 4, "Baron"),
+    (250, 5, "Count"),
+    (500, 6, "Duke"),
+    (1000, 7, "Prince"),
+    (2500, 8, "King"),
+    (5000, 9, "Emperor"),
 ]
+
+# Emoji per tier (shown in medals + profile)
+# Keyed by tier_title lowercase
+MEDAL_EMOJIS = {
+    "page": "📜",
+    "squire": "🪶",
+    "knight": "🛡️",
+    "baron": "🏰",
+    "count": "📯",
+    "duke": "👑",
+    "prince": "⚔️",
+    "king": "🦁",
+    "emperor": "🜲",
+}
