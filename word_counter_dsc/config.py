@@ -20,7 +20,7 @@ COUNT_MODE = os.getenv("COUNT_MODE", "UNIQUE").strip().upper()
 # -----------------------------
 # Auto-backfill
 # -----------------------------
-AUTO_BACKFILL_ENABLED = os.getenv("AUTO_BACKFILL_ENABLED", "1") == "1"
+AUTO_BACKFILL_ENABLED = os.getenv("AUTO_BACKFILL_ENABLED", "0") == "1"  # default off on hosted deployments
 BACKFILL_LIMIT_PER_CHANNEL = int(os.getenv("BACKFILL_LIMIT_PER_CHANNEL", "2000"))
 
 # -----------------------------
