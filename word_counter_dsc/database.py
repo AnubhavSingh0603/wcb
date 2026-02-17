@@ -1,19 +1,21 @@
-"""Database backend (SQLite by default, Postgres optional).
-
-This project is designed to run out-of-the-box with SQLite (aiosqlite).
-For Postgres, set DB_DIALECT=postgres and provide DATABASE_URL.
-
-All cogs should use the helper methods on `bot.dbx` (database adapter),
-and the `bot.db_lock` to serialize writes.
-"""
-
-from __future__ import annotations
-
 import asyncio
+import logging
+import os
+import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+import aiosqlite
+
+try:
+    import asyncpg  # type: ignore
+except Exception:  # pragma: no cover
+    asyncpg = None
+
 from word_counter_dsc.config import DB_DIALECT, DB_PATH, DATABASE_URL
+
+log = logging.getLogger("word_counter_dsc")
 
 
 SCHEMA_SQLITE = """
@@ -34,22 +36,6 @@ CREATE TABLE IF NOT EXISTS keywords (
     PRIMARY KEY (guild_id, keyword)
 );
 
-CREATE TABLE IF NOT EXISTS stopwords (
-    guild_id   INTEGER NOT NULL,
-    word       TEXT    NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, word)
-);
-
-CREATE TABLE IF NOT EXISTS keyword_medals (
-    guild_id   INTEGER NOT NULL,
-    keyword    TEXT    NOT NULL,
-    user_id    INTEGER NOT NULL,
-    best_tier  INTEGER NOT NULL DEFAULT 0,
-    awarded_at INTEGER NOT NULL,
-    PRIMARY KEY (guild_id, keyword, user_id)
-);
-
 CREATE TABLE IF NOT EXISTS keyword_removals (
     guild_id   INTEGER NOT NULL,
     keyword    TEXT    NOT NULL,
@@ -57,13 +43,36 @@ CREATE TABLE IF NOT EXISTS keyword_removals (
     PRIMARY KEY (guild_id, keyword)
 );
 
-CREATE INDEX IF NOT EXISTS idx_word_guild_word ON word_counts(guild_id, word);
-CREATE INDEX IF NOT EXISTS idx_word_guild_channel_word ON word_counts(guild_id, channel_id, word);
-CREATE INDEX IF NOT EXISTS idx_word_guild_user_word ON word_counts(guild_id, user_id, word);
-CREATE INDEX IF NOT EXISTS idx_kw_guild ON keywords(guild_id);
-CREATE INDEX IF NOT EXISTS idx_medals_guild_keyword ON keyword_medals(guild_id, keyword);
-"""
+CREATE TABLE IF NOT EXISTS stopwords (
+    guild_id   INTEGER NOT NULL,
+    word       TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, word)
+);
 
+CREATE TABLE IF NOT EXISTS keyword_abbreviations (
+    guild_id   INTEGER NOT NULL,
+    abbr       TEXT    NOT NULL,
+    keyword    TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, abbr)
+);
+
+CREATE TABLE IF NOT EXISTS keyword_medals (
+    guild_id    INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    keyword     TEXT    NOT NULL,
+    tier        INTEGER NOT NULL,
+    total_count INTEGER NOT NULL,
+    awarded_at  INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, user_id, keyword)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wc_guild_word ON word_counts(guild_id, word);
+CREATE INDEX IF NOT EXISTS idx_wc_guild_user ON word_counts(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_kw_guild ON keywords(guild_id);
+CREATE INDEX IF NOT EXISTS idx_abbr_guild ON keyword_abbreviations(guild_id);
+"""
 
 SCHEMA_POSTGRES = """
 CREATE TABLE IF NOT EXISTS word_counts (
@@ -83,22 +92,6 @@ CREATE TABLE IF NOT EXISTS keywords (
     PRIMARY KEY (guild_id, keyword)
 );
 
-CREATE TABLE IF NOT EXISTS stopwords (
-    guild_id   BIGINT NOT NULL,
-    word       TEXT   NOT NULL,
-    created_at BIGINT NOT NULL,
-    PRIMARY KEY (guild_id, word)
-);
-
-CREATE TABLE IF NOT EXISTS keyword_medals (
-    guild_id   BIGINT NOT NULL,
-    keyword    TEXT   NOT NULL,
-    user_id    BIGINT NOT NULL,
-    best_tier  INT    NOT NULL DEFAULT 0,
-    awarded_at BIGINT NOT NULL,
-    PRIMARY KEY (guild_id, keyword, user_id)
-);
-
 CREATE TABLE IF NOT EXISTS keyword_removals (
     guild_id   BIGINT NOT NULL,
     keyword    TEXT   NOT NULL,
@@ -106,157 +99,164 @@ CREATE TABLE IF NOT EXISTS keyword_removals (
     PRIMARY KEY (guild_id, keyword)
 );
 
-CREATE INDEX IF NOT EXISTS idx_word_guild_word ON word_counts(guild_id, word);
-CREATE INDEX IF NOT EXISTS idx_word_guild_channel_word ON word_counts(guild_id, channel_id, word);
-CREATE INDEX IF NOT EXISTS idx_word_guild_user_word ON word_counts(guild_id, user_id, word);
+CREATE TABLE IF NOT EXISTS stopwords (
+    guild_id   BIGINT NOT NULL,
+    word       TEXT   NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, word)
+);
+
+CREATE TABLE IF NOT EXISTS keyword_abbreviations (
+    guild_id   BIGINT NOT NULL,
+    abbr       TEXT    NOT NULL,
+    keyword    TEXT    NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, abbr)
+);
+
+CREATE TABLE IF NOT EXISTS keyword_medals (
+    guild_id    BIGINT NOT NULL,
+    user_id     BIGINT NOT NULL,
+    keyword     TEXT   NOT NULL,
+    tier        BIGINT NOT NULL,
+    total_count BIGINT NOT NULL,
+    awarded_at  BIGINT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, keyword)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wc_guild_word ON word_counts(guild_id, word);
+CREATE INDEX IF NOT EXISTS idx_wc_guild_user ON word_counts(guild_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_kw_guild ON keywords(guild_id);
-CREATE INDEX IF NOT EXISTS idx_medals_guild_keyword ON keyword_medals(guild_id, keyword);
+CREATE INDEX IF NOT EXISTS idx_abbr_guild ON keyword_abbreviations(guild_id);
 """
 
 
-class DBX:
-    """Small adapter to hide placeholder differences."""
-
-    async def close(self) -> None:
-        raise NotImplementedError
-
-    async def executescript(self, script: str) -> None:
-        raise NotImplementedError
-
-    async def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
-        raise NotImplementedError
-
-    async def fetchone(self, sql: str, params: Iterable[Any] = ()) -> Optional[tuple]:
-        raise NotImplementedError
-
-    async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[tuple]:
-        raise NotImplementedError
-
-    async def commit(self) -> None:
-        raise NotImplementedError
+def _now() -> int:
+    return int(time.time())
 
 
 @dataclass
+class DBX:
+    dialect: str
+
+    async def connect(self):
+        raise NotImplementedError
+
+    async def close(self):
+        raise NotImplementedError
+
+    async def execute(self, sql: str, params: Iterable[Any] = ()):
+        raise NotImplementedError
+
+    async def fetchone(self, sql: str, params: Iterable[Any] = ()):
+        raise NotImplementedError
+
+    async def fetchall(self, sql: str, params: Iterable[Any] = ()):
+        raise NotImplementedError
+
+    async def commit(self):
+        raise NotImplementedError
+
+
 class SQLiteDBX(DBX):
-    conn: Any
+    def __init__(self, path: str):
+        super().__init__("sqlite")
+        self.path = path
+        self.conn: Optional[aiosqlite.Connection] = None
 
-    async def close(self) -> None:
-        await self.conn.close()
+    async def connect(self):
+        self.conn = await aiosqlite.connect(self.path)
+        await self.conn.execute("PRAGMA journal_mode=WAL;")
+        await self.conn.execute("PRAGMA synchronous=NORMAL;")
+        await self.conn.execute("PRAGMA foreign_keys=ON;")
+        await self.conn.commit()
 
-    async def executescript(self, script: str) -> None:
-        await self.conn.executescript(script)
+    async def close(self):
+        if self.conn is not None:
+            await self.conn.close()
 
-    async def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
-        return await self.conn.execute(sql, tuple(params))
+    async def execute(self, sql: str, params: Iterable[Any] = ()):
+        assert self.conn is not None
+        return await self.conn.execute(sql, list(params))
 
-    async def fetchone(self, sql: str, params: Iterable[Any] = ()) -> Optional[tuple]:
-        cur = await self.conn.execute(sql, tuple(params))
+    async def fetchone(self, sql: str, params: Iterable[Any] = ()):
+        assert self.conn is not None
+        cur = await self.conn.execute(sql, list(params))
         return await cur.fetchone()
 
-    async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[tuple]:
-        cur = await self.conn.execute(sql, tuple(params))
+    async def fetchall(self, sql: str, params: Iterable[Any] = ()):
+        assert self.conn is not None
+        cur = await self.conn.execute(sql, list(params))
         return await cur.fetchall()
 
-    async def commit(self) -> None:
+    async def commit(self):
+        assert self.conn is not None
         await self.conn.commit()
 
 
-@dataclass
 class PostgresDBX(DBX):
-    pool: Any
+    def __init__(self, url: str):
+        super().__init__("postgres")
+        self.url = url
+        self.pool: Any = None
 
-    async def close(self) -> None:
-        await self.pool.close()
+    async def connect(self):
+        if asyncpg is None:
+            raise RuntimeError("asyncpg is not installed but postgres dialect was requested.")
+        self.pool = await asyncpg.create_pool(self.url, min_size=1, max_size=5)
 
-    async def executescript(self, script: str) -> None:
-        # simple split on semicolon for schema (safe enough for our schema)
-        stmts = [s.strip() for s in script.split(";") if s.strip()]
-        async with self.pool.acquire() as conn:
-            for s in stmts:
-                await conn.execute(s)
+    async def close(self):
+        if self.pool is not None:
+            await self.pool.close()
 
-    def _pg(self, sql: str) -> str:
-        # Convert SQLite '?' placeholders to Postgres '$1, $2, ...'
+    def _q(self, sql: str) -> str:
+        # convert "?" placeholders to $1 $2 ...
         out = []
-        idx = 1
+        i = 1
         for ch in sql:
             if ch == "?":
-                out.append(f"${idx}")
-                idx += 1
+                out.append(f"${i}")
+                i += 1
             else:
                 out.append(ch)
         return "".join(out)
 
-    async def execute(self, sql: str, params: Iterable[Any] = ()) -> Any:
-        sql = self._pg(sql)
+    async def execute(self, sql: str, params: Iterable[Any] = ()):
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
-            return await conn.execute(sql, *list(params))
+            return await conn.execute(self._q(sql), *list(params))
 
-    async def fetchone(self, sql: str, params: Iterable[Any] = ()) -> Optional[tuple]:
-        sql = self._pg(sql)
+    async def fetchone(self, sql: str, params: Iterable[Any] = ()):
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(sql, *list(params))
-            return tuple(row) if row is not None else None
+            return await conn.fetchrow(self._q(sql), *list(params))
 
-    async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[tuple]:
-        sql = self._pg(sql)
+    async def fetchall(self, sql: str, params: Iterable[Any] = ()):
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(sql, *list(params))
+            rows = await conn.fetch(self._q(sql), *list(params))
+            # normalize to tuples so rest of code can treat sqlite/pg similarly
             return [tuple(r) for r in rows]
 
-    async def commit(self) -> None:
-        # autocommit is typical for asyncpg execute/fetch calls
-        return None
+    async def commit(self):
+        # asyncpg auto-commits each statement unless you use explicit transactions
+        return
 
 
-async def init_db(bot) -> None:
-    """Initialize `bot.dbx` + schema + lock."""
-    if getattr(bot, "db_lock", None) is None:
-        bot.db_lock = asyncio.Lock()
-
+async def init_db() -> DBX:
     if DB_DIALECT == "postgres":
-        try:
-            import asyncpg  # type: ignore
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError(
-                "Postgres backend requested but asyncpg is not installed. "
-                "Install with: pip install asyncpg"
-            ) from e
+        dbx = PostgresDBX(DATABASE_URL)
+        await dbx.connect()
+        # create schema
+        for stmt in [s.strip() for s in SCHEMA_POSTGRES.split(";") if s.strip()]:
+            await dbx.execute(stmt)
+        return dbx
 
-        if not DATABASE_URL:
-            raise RuntimeError("DB_DIALECT=postgres set but DATABASE_URL is empty")
-
-        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-        bot.dbx = PostgresDBX(pool=pool)
-        async with bot.db_lock:
-            await bot.dbx.executescript(SCHEMA_POSTGRES)
-        return
-
-    # default: sqlite
-    import aiosqlite
-
-    conn = await aiosqlite.connect(DB_PATH)
-    await conn.execute("PRAGMA journal_mode=WAL;")
-    await conn.execute("PRAGMA synchronous=NORMAL;")
-    bot.dbx = SQLiteDBX(conn=conn)
-    async with bot.db_lock:
-        await bot.dbx.executescript(SCHEMA_SQLITE)
-        await bot.dbx.commit()
-
-
-async def close_db(bot) -> None:
-    """Close the database connection/pool if it exists.
-
-    Note: aiosqlite uses a background worker thread. On Windows,
-    leaving a connection open can keep the process alive, making
-    subprocess-based smoke tests appear to "hang".
-    """
-    dbx = getattr(bot, "dbx", None)
-    if dbx is None:
-        return
-    try:
-        await dbx.close()
-    except Exception:
-        pass
-    finally:
-        bot.dbx = None
+    # default sqlite
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    dbx = SQLiteDBX(DB_PATH)
+    await dbx.connect()
+    for stmt in [s.strip() for s in SCHEMA_SQLITE.split(";") if s.strip()]:
+        await dbx.execute(stmt)
+    await dbx.commit()
+    return dbx
