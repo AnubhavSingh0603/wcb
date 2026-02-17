@@ -21,6 +21,12 @@ def best_tier_for_total(cnt: int) -> int:
     return best
 
 
+
+
+def safe_user_mention(user_id: int) -> str:
+    """Clickable mention that won't notify when sent with AllowedMentions.none()."""
+    return f"<@{int(user_id)}>"
+
 class MedalsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -138,7 +144,7 @@ class MedalsCog(commands.Cog):
 
             e = base_embed(
                 f"🏅 Medal Unlocked — {title}",
-                f"{message.author.mention} earned **{title}** for keyword `{kw}`!\n{flair}",
+                f"{safe_user_mention(message.author.id)} earned **{title}** for keyword `{kw}`!\n{flair}",
                 color=Theme.medal_color(title),
             )
             try:
