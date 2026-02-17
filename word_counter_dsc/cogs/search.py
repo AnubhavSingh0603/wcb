@@ -10,6 +10,12 @@ def clamp(n: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(n)))
 
 
+
+def safe_user_mention(user_id: int) -> str:
+    """Return a clickable user mention that will NOT notify when sent with AllowedMentions.none()."""
+    return f"<@{int(user_id)}>"
+
+
 class SearchCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -83,10 +89,10 @@ class SearchCog(commands.Cog):
                     total = int((row[0] if row else 0) or 0)
                     e = base_embed(
                         title=f"✅ Total for \"{resolved_word}\"",
-                        description=f"{user.mention} in {channel.mention}: **{total}**",
+                        description=f"{safe_user_mention(user.id)} in {channel.mention}: **{total}**",
                         color=Theme.GOLD,
                     )
-                    return await interaction.response.send_message(embed=e)
+                    return await interaction.response.send_message(embed=e, allowed_mentions=discord.AllowedMentions.none())
             else:
                 # keyword-set mode
                 kws = await self.bot.dbx.fetchall(
@@ -100,7 +106,7 @@ class SearchCog(commands.Cog):
                         "Add keywords with `/keyword add <word>` first.",
                         color=Theme.SLATE,
                     )
-                    return await interaction.response.send_message(embed=e)
+                    return await interaction.response.send_message(embed=e, allowed_mentions=discord.AllowedMentions.none())
 
                 where = ["guild_id=?"]
                 params = [guild_id]
@@ -127,14 +133,14 @@ class SearchCog(commands.Cog):
 
         if not rows:
             e = base_embed("No data found", "Try a different scope or word.", color=Theme.SLATE)
-            return await interaction.response.send_message(embed=e)
+            return await interaction.response.send_message(embed=e, allowed_mentions=discord.AllowedMentions.none())
 
         e = base_embed(title, color=Theme.BLUE)
         lines = []
         for i, (key, total) in enumerate(rows, start=1):
             if fmt == "user":
                 m = interaction.guild.get_member(int(key))
-                label = m.mention if m else f"`{key}`"
+                label = safe_user_mention(int(key)) if m else f"`{key}`"
             elif fmt == "channel":
                 ch = interaction.guild.get_channel(int(key))
                 label = ch.mention if ch else f"`{key}`"
@@ -146,9 +152,9 @@ class SearchCog(commands.Cog):
         if channel:
             e.add_field(name="Scope", value=f"Channel: {channel.mention}")
         if user:
-            e.add_field(name="Scope", value=f"User: {user.mention}")
+            e.add_field(name="Scope", value=f"User: {safe_user_mention(user.id)}")
 
-        await interaction.response.send_message(embed=e)
+        await interaction.response.send_message(embed=e, allowed_mentions=discord.AllowedMentions.none())
 
     @discord.app_commands.command(
         name="top",
