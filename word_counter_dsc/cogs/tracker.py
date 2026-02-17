@@ -2,10 +2,24 @@ import discord
 from discord.ext import commands
 
 from word_counter_dsc.config import COUNT_MODE
-from word_counter_dsc.utils import tokenize, counter_from_mode, BUILTIN_STOPWORDS
+from word_counter_dsc.utils import (
+    tokenize,
+    counter_from_mode,
+    BUILTIN_STOPWORDS,
+    count_keyword_hits,
+)
 
 
 class Tracker(commands.Cog):
+    """
+    Message ingest:
+      - tokenizes and stores word counts (excluding stopwords)
+      - additionally, for ACTIVE keywords, counts permissive variants (plurals/verbs/in-word use)
+        and credits them to the canonical keyword in the DB.
+        Example: keyword='fuck' counts 'fucks', 'fucking', 'motherfucker', 'abso-fucking-lutely', etc.
+      - abbreviation mapping (server-configurable): tokens like 'wtf' can be mapped to a keyword.
+    """
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -14,7 +28,8 @@ class Tracker(commands.Cog):
         if message.guild is None or message.author.bot:
             return
 
-        words_all = tokenize(message.content)
+        content = message.content or ""
+        words_all = tokenize(content)
         if not words_all:
             return
 
@@ -32,6 +47,43 @@ class Tracker(commands.Cog):
             )
         for (w,) in rows:
             inc.pop(w, None)
+
+        # Load ACTIVE keywords + abbreviations (best-effort, should never break counting)
+        active_keywords: list[str] = []
+        abbrev_map: dict[str, str] = {}
+        try:
+            async with self.bot.db_lock:
+                kw_rows = await self.bot.dbx.fetchall(
+                    "SELECT keyword FROM keywords WHERE guild_id=? AND removed_at IS NULL",
+                    (message.guild.id,),
+                )
+                ab_rows = await self.bot.dbx.fetchall(
+                    "SELECT abbr, keyword FROM keyword_abbreviations WHERE guild_id=?",
+                    (message.guild.id,),
+                )
+            active_keywords = [r[0] for r in kw_rows]
+            abbrev_map = {a: k for a, k in ab_rows}
+        except Exception:
+            active_keywords = []
+            abbrev_map = {}
+
+        # Upgrade counts for active keywords using permissive matching.
+        # Avoid double counting: if exact token counts already exist for the keyword,
+        # only add the "extra" hits.
+        if active_keywords:
+            for kw in active_keywords:
+                raw_hits = count_keyword_hits(content, kw, abbrev_to_keyword=abbrev_map)
+                if COUNT_MODE == "UNIQUE":
+                    desired = 1 if raw_hits > 0 else 0
+                else:
+                    desired = raw_hits
+
+                if desired <= 0:
+                    continue
+
+                current = int(inc.get(kw, 0))
+                if desired > current:
+                    inc[kw] = desired
 
         if not inc:
             return
