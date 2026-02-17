@@ -93,3 +93,10 @@ def chunk_list(items, size: int):
     size = max(1, int(size))
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+# ---- Discord formatting helpers (no-ping when used with AllowedMentions.none()) ----
+
+def user_mention(user_id: int) -> str:
+    """Return a clickable user mention string (<@id>). Does not ping if AllowedMentions.none() is used."""
+    return f"<@{int(user_id)}>"
