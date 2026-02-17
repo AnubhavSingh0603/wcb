@@ -41,7 +41,7 @@ def validate_token_format(token: str) -> tuple[bool, str]:
 def build_bot() -> commands.Bot:
     intents = discord.Intents.default()
     intents.message_content = True  # required for on_message tracking
-    bot = commands.Bot(command_prefix="!", intents=intents)
+    bot = commands.Bot(command_prefix="!", intents=intents, allowed_mentions=discord.AllowedMentions.none())
 
     # --------- GLOBAL APP COMMAND ERROR HANDLER ----------
     @bot.tree.error
