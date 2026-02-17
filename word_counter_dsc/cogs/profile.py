@@ -5,7 +5,7 @@ from discord.ext import commands
 from word_counter_dsc.config import MEDAL_THRESHOLDS
 from word_counter_dsc.ui.theme import base_embed, Theme
 from word_counter_dsc.ui.pagination import PagedEmbedView
-
+from word_counter_dsc.utils import user_link_no_ping
 
 TIER_BY_NUM = {tier: title for _thr, tier, title in MEDAL_THRESHOLDS}
 
@@ -13,136 +13,164 @@ TIER_BY_NUM = {tier: title for _thr, tier, title in MEDAL_THRESHOLDS}
 def fmt_ts(ts: int | None) -> str:
     if not ts:
         return "—"
-    return dt.datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+    return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
 class ProfileCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @discord.app_commands.command(name="userprofile", description="Show a user profile: stats, keywords, medals")
-    async def userprofile(self, interaction: discord.Interaction, user: discord.Member | None = None):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-
-        user = user or interaction.user
-        guild_id = interaction.guild.id
-
+    async def _top_word(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
         async with self.bot.db_lock:
-            row_total = await self.bot.dbx.fetchone(
-                "SELECT COALESCE(SUM(count),0) FROM word_counts WHERE guild_id=? AND user_id=?",
-                (guild_id, user.id),
-            )
-            total_words = int((row_total[0] if row_total else 0) or 0)
-
-            row_dist = await self.bot.dbx.fetchone(
-                "SELECT COUNT(DISTINCT word) FROM word_counts WHERE guild_id=? AND user_id=?",
-                (guild_id, user.id),
-            )
-            distinct_words = int((row_dist[0] if row_dist else 0) or 0)
-
-            kw_rows = await self.bot.dbx.fetchall(
-                "SELECT keyword, removed_at FROM keywords WHERE guild_id=?",
-                (guild_id,),
-            )
-            kws = [r[0] for r in kw_rows]
-            removed_map = {r[0]: bool(r[1]) for r in kw_rows}
-
-            keyword_usage = []
-            total_keyword_usage = 0
-            if kws:
-                placeholders = ",".join("?" for _ in kws)
-                rows = await self.bot.dbx.fetchall(
-                    f"""
-                    SELECT word, COALESCE(SUM(count),0) AS total
-                    FROM word_counts
-                    WHERE guild_id=? AND user_id=? AND word IN ({placeholders})
-                    GROUP BY word
-                    ORDER BY total DESC
-                    """,
-                    (guild_id, user.id, *kws),
-                )
-                used_map = {w: int(t or 0) for w, t in rows}
-                # include zeros for unused keywords
-                keyword_usage = [
-                    (k, used_map.get(k, 0), removed_map.get(k, False))
-                    for k in kws
-                ]
-                keyword_usage.sort(key=lambda x: (-x[1], x[0]))
-                total_keyword_usage = sum(t for _w, t, _rm in keyword_usage)
-
-            medal_rows = await self.bot.dbx.fetchall(
+            row = await self.bot.dbx.fetchone(
                 """
-                SELECT keyword, best_tier, awarded_at
-                FROM keyword_medals
+                SELECT word, SUM(count) AS c
+                FROM word_counts
                 WHERE guild_id=? AND user_id=?
+                GROUP BY word
+                ORDER BY c DESC
+                LIMIT 1
                 """,
-                (guild_id, user.id),
+                (guild_id, user_id),
             )
+        if not row:
+            return (None, 0)
+        return (row[0], int(row[1] or 0))
 
-        # Sort medals by tier desc, then keyword
-        medals = sorted(
-            [(kw, int(tier), int(ts or 0)) for kw, tier, ts in medal_rows if int(tier or 0) > 0],
-            key=lambda x: (-x[1], x[0]),
+    async def _unique_word(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
+        """
+        A "unique word" here means: used by this user in this server, and never used by anyone else.
+        We return the strongest such word by this user's count.
+        """
+        async with self.bot.db_lock:
+            row = await self.bot.dbx.fetchone(
+                """
+                WITH me AS (
+                    SELECT word, SUM(count) AS myc
+                    FROM word_counts
+                    WHERE guild_id=? AND user_id=?
+                    GROUP BY word
+                ),
+                others AS (
+                    SELECT word, SUM(count) AS oc
+                    FROM word_counts
+                    WHERE guild_id=? AND user_id<>?
+                    GROUP BY word
+                )
+                SELECT me.word, me.myc
+                FROM me
+                LEFT JOIN others ON others.word = me.word
+                WHERE COALESCE(others.oc, 0) = 0
+                ORDER BY me.myc DESC
+                LIMIT 1
+                """,
+                (guild_id, user_id, guild_id, user_id),
+            )
+        if not row:
+            return (None, 0)
+        return (row[0], int(row[1] or 0))
+
+    async def _top_keyword(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
+        async with self.bot.db_lock:
+            row = await self.bot.dbx.fetchone(
+                """
+                SELECT wc.word, SUM(wc.count) AS c
+                FROM word_counts wc
+                JOIN keywords k
+                  ON k.guild_id = wc.guild_id
+                 AND k.keyword = wc.word
+                 AND k.removed_at IS NULL
+                WHERE wc.guild_id=? AND wc.user_id=?
+                GROUP BY wc.word
+                ORDER BY c DESC
+                LIMIT 1
+                """,
+                (guild_id, user_id),
+            )
+        if not row:
+            return (None, 0)
+        return (row[0], int(row[1] or 0))
+
+    async def _medals_summary(self, guild_id: int, user_id: int) -> list[tuple[str, str, int]]:
+        """
+        Returns list of (keyword, tier_title, total_count) for this user,
+        ordered by tier desc then count desc.
+        """
+        async with self.bot.db_lock:
+            rows = await self.bot.dbx.fetchall(
+                """
+                SELECT m.keyword, m.tier, m.total_count
+                FROM keyword_medals m
+                WHERE m.guild_id=? AND m.user_id=?
+                ORDER BY m.tier DESC, m.total_count DESC
+                """,
+                (guild_id, user_id),
+            )
+        out = []
+        for kw, tier, total in rows:
+            out.append((kw, TIER_BY_NUM.get(int(tier), f"Tier {tier}"), int(total or 0)))
+        return out
+
+    async def _render_profile(self, interaction: discord.Interaction, member: discord.Member):
+        gid = interaction.guild.id
+        uid = member.id
+
+        topw, topw_c = await self._top_word(gid, uid)
+        uniqw, uniqw_c = await self._unique_word(gid, uid)
+        topk, topk_c = await self._top_keyword(gid, uid)
+        medals = await self._medals_summary(gid, uid)
+
+        title = f"👤 Profile · {member.display_name}"
+        e = base_embed(title, color=Theme.BLUE)
+        e.set_thumbnail(url=member.display_avatar.url)
+
+        # Quick facts
+        e.add_field(
+            name="Most used word",
+            value=(f"`{topw}` · **{topw_c:,}**" if topw else "—"),
+            inline=True,
+        )
+        e.add_field(
+            name="Most unique word",
+            value=(f"`{uniqw}` · **{uniqw_c:,}**" if uniqw else "—"),
+            inline=True,
+        )
+        e.add_field(
+            name="Top keyword",
+            value=(f"`{topk}` · **{topk_c:,}**" if topk else "—"),
+            inline=True,
         )
 
-        # Build paged embeds (keywords list can be long)
-        header = base_embed("👤 User Profile", color=Theme.GOLD)
-        header.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
-        header.set_thumbnail(url=user.display_avatar.url)
+        # Medal list (paged)
+        if not medals:
+            e.add_field(name="Medals", value="No medals yet.", inline=False)
+            e.set_footer(text=f"User: {user_link_no_ping(uid)}")
+            return await interaction.response.send_message(embed=e, ephemeral=False)
 
-        joined = getattr(user, "joined_at", None)
-        joined_str = joined.strftime("%Y-%m-%d") if joined else "—"
+        lines = [f"**{tier}** · `{kw}` · **{total:,}**" for kw, tier, total in medals]
+        pages = []
+        chunk = 10
+        for i in range(0, len(lines), chunk):
+            p = base_embed(title, color=Theme.BLUE)
+            p.set_thumbnail(url=member.display_avatar.url)
+            p.add_field(name="Medals", value="\n".join(lines[i : i + chunk]), inline=False)
+            p.set_footer(text=f"User: {user_link_no_ping(uid)}")
+            pages.append(p)
 
-        header.add_field(name="Total words", value=f"**{total_words}**", inline=True)
-        header.add_field(name="Distinct words", value=f"**{distinct_words}**", inline=True)
-        header.add_field(name="Keyword usage", value=f"**{total_keyword_usage}**", inline=True)
-        header.add_field(name="Joined", value=joined_str, inline=True)
+        view = PagedEmbedView(pages, author_id=interaction.user.id)
+        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=False)
 
-        embeds = [header]
+    @discord.app_commands.command(name="me", description="Show your profile")
+    async def me(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
+        await self._render_profile(interaction, interaction.user)
 
-        # Keyword usage pages
-        if keyword_usage:
-            per_page = 12
-            for p in range(0, len(keyword_usage), per_page):
-                chunk = keyword_usage[p : p + per_page]
-                e = base_embed("🏷️ Keywords (usage)", color=Theme.BLUE)
-                e.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
-                lines = []
-                for i, (w, t, is_removed) in enumerate(chunk, start=p + 1):
-                    tag = " *(removed)*" if is_removed else ""
-                    lines.append(f"**{i}.** `{w}` — **{t}**{tag}")
-                e.description = "\n".join(lines)
-                embeds.append(e)
-        else:
-            e = base_embed("🏷️ Keywords (usage)", "No keyword usage yet (or no active keywords).", color=Theme.SLATE)
-            e.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
-            embeds.append(e)
-
-        # Medals page(s)
-        if medals:
-            per_page = 12
-            for p in range(0, len(medals), per_page):
-                chunk = medals[p : p + per_page]
-                e = base_embed("🏅 Medals", color=Theme.PURPLE)
-                e.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
-                lines = []
-                for kw, tier, ts in chunk:
-                    title = TIER_BY_NUM.get(tier, f"Tier {tier}")
-                    lines.append(f"**{title}** — `{kw}`  *(awarded {fmt_ts(ts)})*")
-                e.description = "\n".join(lines)
-                embeds.append(e)
-        else:
-            e = base_embed("🏅 Medals", "No medals yet.", color=Theme.SLATE)
-            e.set_author(name=f"{user.display_name}", icon_url=user.display_avatar.url)
-            embeds.append(e)
-
-        view = PagedEmbedView(embeds, timeout=90, author_id=interaction.user.id)
-        await interaction.response.send_message(embed=embeds[0], view=view)
-
-    @discord.app_commands.command(name="profile", description="Your profile")
-    async def profile(self, interaction: discord.Interaction):
-        await self.userprofile.callback(self, interaction, user=None)
+    @discord.app_commands.command(name="profile", description="Show a user's profile")
+    async def profile(self, interaction: discord.Interaction, user: discord.Member | None = None):
+        if interaction.guild is None:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
+        await self._render_profile(interaction, user or interaction.user)
 
 
 async def setup(bot: commands.Bot):
