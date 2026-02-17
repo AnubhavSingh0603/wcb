@@ -43,7 +43,7 @@ class Tracker(commands.Cog):
                     INSERT INTO word_counts (guild_id, channel_id, user_id, word, count)
                     VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(guild_id, channel_id, user_id, word)
-                    DO UPDATE SET count = count + excluded.count
+                    DO UPDATE SET count = word_counts.count + excluded.count
                     """,
                     (message.guild.id, message.channel.id, message.author.id, w, int(delta)),
                 )
