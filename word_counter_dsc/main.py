@@ -8,8 +8,21 @@ import os
 import discord
 from discord.ext import commands
 
-from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
-from word_counter_dsc.database import init_db, Database
+# When running this file directly (python word_counter_dsc/main.py) the
+# package may not be on sys.path which causes ModuleNotFoundError. Try the
+# normal absolute imports first and fall back to inserting the project
+# root into sys.path so `word_counter_dsc` can be imported.
+try:
+    from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
+    from word_counter_dsc.database import init_db, Database
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
+    from word_counter_dsc.database import init_db, Database
 
 EXTENSIONS = [
     "word_counter_dsc.cogs.tracker",

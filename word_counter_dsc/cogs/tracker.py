@@ -4,6 +4,8 @@ import discord
 from discord.ext import commands
 
 from word_counter_dsc.config import KEYWORD_ALIASES, MATCH_MODE
+import time
+
 from word_counter_dsc.utils import tokenize, count_keyword_occurrences
 
 class TrackerCog(commands.Cog):
@@ -32,18 +34,18 @@ class TrackerCog(commands.Cog):
 
         # ---- server keyword list + abbreviations ----
         kw_rows = await self.bot.dbx.fetchall(
-            "SELECT keyword FROM keywords WHERE guild_id=?",
+            "SELECT word FROM keywords WHERE guild_id=?",
             (gid,),
         )
-        keywords = [r["keyword"] for r in kw_rows]
+        keywords = [str(r["word"]) for r in kw_rows]
         if not keywords:
             return
 
         ab_rows = await self.bot.dbx.fetchall(
-            "SELECT abbr, expansion FROM abbreviations WHERE guild_id=?",
+            "SELECT abbreviation, expansion FROM abbreviations WHERE guild_id=?",
             (gid,),
         )
-        abbr_map = {r["abbr"]: r["expansion"] for r in ab_rows}
+        abbr_map = {str(r["abbreviation"]): str(r["expansion"]) for r in ab_rows}
 
         lower_text = text.lower()
 
@@ -55,6 +57,8 @@ class TrackerCog(commands.Cog):
                 lower_text += " " + exp
 
         # ---- count keyword occurrences ----
+        now = int(time.time())
+
         for kw in keywords:
             aliases = KEYWORD_ALIASES.get(kw, [])
             if MATCH_MODE == 0:
@@ -67,12 +71,14 @@ class TrackerCog(commands.Cog):
 
             await self.bot.dbx.execute(
                 """
-                INSERT INTO word_counts (guild_id, channel_id, user_id, word, count)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO word_counts (guild_id, channel_id, user_id, word, count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id, channel_id, user_id, word)
-                DO UPDATE SET count = count + excluded.count
+                -- Postgres needs qualification here (count exists in both target table and EXCLUDED)
+                DO UPDATE SET count = word_counts.count + excluded.count,
+                              updated_at = excluded.updated_at
                 """,
-                (gid, cid, uid, kw, int(c)),
+                (gid, cid, uid, kw, int(c), now),
             )
 
 async def setup(bot: commands.Bot):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -22,24 +24,11 @@ DEFAULT_STOPWORDS = {
     "go","going","went","come","came","get","got","make","made","take","took",
 }
 
-class StopwordGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="stopword", description="Manage stopwords (words ignored for fun stats)")
 
-class StopwordsCog(commands.Cog):
+class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="Manage stopwords (words ignored for fun stats)"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.group = StopwordGroup()
-        self.group.add_command(self.list_sw)
-        self.group.add_command(self.add_sw)
-        self.group.add_command(self.remove_sw)
-        self.group.add_command(self.seed_defaults)
-
-    async def cog_load(self):
-        self.bot.tree.add_command(self.group)
-
-    async def cog_unload(self):
-        self.bot.tree.remove_command(self.group.name, type=self.group.type)
+        super().__init__()
 
     @app_commands.command(name="list", description="Show stopwords for this server.")
     async def list_sw(self, interaction: discord.Interaction):
@@ -49,7 +38,7 @@ class StopwordsCog(commands.Cog):
             "SELECT word FROM stopwords WHERE guild_id=? ORDER BY word ASC",
             (gid,),
         )
-        words = [r["word"] for r in rows]
+        words = [str(r["word"]) for r in rows]
         emb = base_embed("Stopwords", "Stopwords are ignored for 'interesting stats' like top words.")
         emb.add_field(
             name=f"Stopwords ({len(words)})",
@@ -69,10 +58,16 @@ class StopwordsCog(commands.Cog):
         if not items:
             await interaction.response.send_message("No stopwords provided.", ephemeral=True)
             return
+
+        now = int(time.time())
         for w in items:
             await self.bot.dbx.execute(
-                "INSERT OR IGNORE INTO stopwords (guild_id, word) VALUES (?, ?)",
-                (gid, w),
+                """
+                INSERT INTO stopwords (guild_id, word, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, word) DO NOTHING
+                """,
+                (gid, w, now),
             )
         await interaction.response.send_message(f"Added {len(items)} stopword(s).", ephemeral=True)
 
@@ -95,12 +90,18 @@ class StopwordsCog(commands.Cog):
     async def seed_defaults(self, interaction: discord.Interaction):
         assert self.bot.dbx is not None
         gid = int(interaction.guild_id or 0)
+        now = int(time.time())
         for w in sorted(DEFAULT_STOPWORDS):
             await self.bot.dbx.execute(
-                "INSERT OR IGNORE INTO stopwords (guild_id, word) VALUES (?, ?)",
-                (gid, w),
+                """
+                INSERT INTO stopwords (guild_id, word, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, word) DO NOTHING
+                """,
+                (gid, w, now),
             )
         await interaction.response.send_message(f"Seeded {len(DEFAULT_STOPWORDS)} default stopwords.", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(StopwordsCog(bot))

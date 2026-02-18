@@ -162,6 +162,8 @@ class SQLiteDBX(DBX):
 
     async def init(self) -> "SQLiteDBX":
         self._conn = await aiosqlite.connect(self.sqlite_path)
+        # Return rows as dict-like objects (so code can do row["col"]) like asyncpg.
+        self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQLITE)
         await self._conn.commit()
         return self
@@ -201,7 +203,57 @@ class PostgresDBX(DBX):
         if asyncpg is None:
             raise RuntimeError("asyncpg is not installed")
         self._pool = await asyncpg.create_pool(self.url, min_size=1, max_size=10, command_timeout=60)
-        await self.execute(SCHEMA_POSTGRES)
+        # asyncpg does not reliably accept multi-statement SQL via a single execute call.
+        # Execute statements one-by-one.
+        stmts = [s.strip() for s in SCHEMA_POSTGRES.split(";") if s.strip()]
+        for s in stmts:
+            await self.execute(s + ";")
+
+        # --- Compatibility migrations (older schema variants) ---
+        # Some earlier versions used different column names like `keyword`/`abbr`.
+        # Since we use CREATE TABLE IF NOT EXISTS above, existing tables won't be altered.
+        # Here we *safely* rename legacy columns to the current canonical names.
+        async with self._pool.acquire() as conn:
+            async def has_col(table: str, col: str) -> bool:
+                q = """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+                LIMIT 1
+                """
+                return (await conn.fetchval(q, table, col)) is not None
+
+            # column renames: (table, old, new)
+            renames = [
+                ("keywords", "keyword", "word"),
+                ("stopwords", "stopword", "word"),
+                ("keyword_removals", "keyword", "word"),
+                ("keyword_medals", "keyword", "word"),
+                ("word_counts", "keyword", "word"),
+                ("abbreviations", "abbr", "abbreviation"),
+            ]
+
+            for table, old, new in renames:
+                if await has_col(table, old) and not await has_col(table, new):
+                    await conn.execute(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";')
+
+            # Ensure timestamp columns exist (older schemas might not have them)
+            # We keep them NOT NULL DEFAULT 0 to avoid breaking existing rows.
+            add_cols = [
+                ("keywords", "created_at", "BIGINT"),
+                ("stopwords", "created_at", "BIGINT"),
+                ("abbreviations", "created_at", "BIGINT"),
+                ("word_counts", "updated_at", "BIGINT"),
+                ("keyword_removals", "removed_at", "BIGINT"),
+                # medals (older schemas might have only (guild_id,user_id,keyword,count) etc.)
+                ("keyword_medals", "tier", "INTEGER"),
+                ("keyword_medals", "awarded_at", "BIGINT"),
+                ("keyword_medals", "total_count", "BIGINT"),
+            ]
+            for table, col, typ in add_cols:
+                if not await has_col(table, col):
+                    await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ} NOT NULL DEFAULT 0;')
+
         return self
 
     def _q(self, sql: str) -> str:
@@ -237,9 +289,15 @@ class PostgresDBX(DBX):
             self._pool = None
 
 
-async def init_db(url: str, sqlite_path: str = "word_counts.db") -> DBX:
+async def init_db(url: str | None = None, sqlite_path: str = "word_counts.db") -> DBX:
+    """Initialize DB.
+
+    - If url is provided or env DATABASE_URL looks like Postgres -> PostgresDBX
+    - Else -> SQLiteDBX (local dev)
+    """
+    url = (url if url is not None else os.getenv("DATABASE_URL", "")).strip()
     # Postgres on Render usually starts with postgres:// or postgresql://
-    u = (url or "").strip().lower()
+    u = url.lower()
     is_pg = u.startswith("postgres://") or u.startswith("postgresql://")
     if is_pg:
         return await PostgresDBX(url=url).init()

@@ -24,7 +24,7 @@ class SearchCog(commands.Cog):
 
         # Validate keyword exists
         exists = await self.bot.dbx.fetchone(
-            "SELECT 1 AS ok FROM keywords WHERE guild_id=? AND keyword=?",
+            "SELECT 1 AS ok FROM keywords WHERE guild_id=? AND word=?",
             (gid, kw),
         )
         if not exists:
