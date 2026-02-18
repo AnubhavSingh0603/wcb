@@ -9,6 +9,7 @@ from discord.ext import commands
 from word_counter_dsc.utils import split_csv_words
 from word_counter_dsc.utils import safe_allowed_mentions
 from word_counter_dsc.ui.theme import base_embed
+from word_counter_dsc.stopwords_core import CORE_STOPWORDS
 
 
 class KeywordCog(commands.GroupCog, group_name="keyword", group_description="Manage tracked keywords"):
@@ -52,8 +53,15 @@ class KeywordCog(commands.GroupCog, group_name="keyword", group_description="Man
             await interaction.response.send_message("No keywords provided.", ephemeral=True)
             return
 
+        # Disallow stopwords as keywords (stopwords are invisible to the bot)
+        sw_rows = await self.bot.dbx.fetchall("SELECT word FROM stopwords WHERE guild_id=?",(gid,))
+        sw = set(CORE_STOPWORDS) | {str(r["word"]) for r in sw_rows}
+
+        allowed = [kw for kw in kws if kw not in sw]
+        skipped = [kw for kw in kws if kw in sw]
+
         now = int(time.time())
-        for kw in kws:
+        for kw in allowed:
             await self.bot.dbx.execute(
                 """
                 INSERT INTO keywords (guild_id, word, created_at)
@@ -64,7 +72,7 @@ class KeywordCog(commands.GroupCog, group_name="keyword", group_description="Man
             )
 
         await interaction.response.send_message(
-            f"Added {len(kws)} keyword(s): " + ", ".join(kws),
+            f"Added {len(allowed)} keyword(s): " + (", ".join(allowed) if allowed else "(none)" ) + ("\nSkipped (stopwords): " + ", ".join(skipped) if skipped else ""),
             ephemeral=True,
         )
 

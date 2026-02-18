@@ -25,15 +25,18 @@ class ProfileCog(commands.Cog):
         # keyword totals for this user
         rows = await self.bot.dbx.fetchall(
             """
-            SELECT word AS keyword, SUM(count) AS total
-            FROM word_counts
-            WHERE guild_id=? AND user_id=?
-            GROUP BY word
+            SELECT k.word AS keyword, SUM(wc.count) AS total
+            FROM word_counts wc
+            JOIN keywords k
+              ON k.guild_id = wc.guild_id
+             AND LOWER(k.word) = LOWER(wc.word)
+            WHERE wc.guild_id=? AND wc.user_id=?
+            GROUP BY k.word
             ORDER BY total DESC
             """,
             (guild_id, uid),
         )
-        kw_totals = [(r["keyword"], int(r["total"])) for r in rows if int(r["total"]) > 0 and str(r["keyword"]) not in CORE_STOPWORDS]
+        kw_totals = [(r["keyword"], int(r["total"])) for r in rows if int(r["total"]) > 0 and str(r["keyword"]).lower() not in CORE_STOPWORDS]
         distinct_kw = len(kw_totals)
         top_kw = kw_totals[0] if kw_totals else None
         rare_kw = kw_totals[-1] if kw_totals else None

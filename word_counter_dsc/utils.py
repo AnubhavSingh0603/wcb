@@ -14,6 +14,188 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|[\u0900-\u097F]+", 
 # Examples: they'd -> they, he'll -> he, it's -> it, can't -> can (handles n't as 't')
 _CONTRACTION_RE = re.compile(r"^([a-z]+)(?:'(?:d|ll|ve|re|m|s|t))$", re.IGNORECASE)
 
+# --- Lightweight Porter Stemmer (for English) ---
+# Based on the original Porter stemming algorithm; implemented here to avoid extra deps.
+# Only applied to simple ASCII a-z words.
+
+_VOWELS = set("aeiou")
+
+def _cons(word: str, i: int) -> bool:
+    ch = word[i]
+    if ch in _VOWELS:
+        return False
+    if ch == "y":
+        return i == 0 or not _cons(word, i - 1)
+    return True
+
+def _m(word: str) -> int:
+    n = 0
+    i = 0
+    L = len(word)
+    while True:
+        if i >= L:
+            return n
+        if not _cons(word, i):
+            break
+        i += 1
+    i += 1
+    while True:
+        while True:
+            if i >= L:
+                return n
+            if _cons(word, i):
+                break
+            i += 1
+        i += 1
+        n += 1
+        while True:
+            if i >= L:
+                return n
+            if not _cons(word, i):
+                break
+            i += 1
+        i += 1
+
+def _vowel_in_stem(word: str) -> bool:
+    return any(not _cons(word, i) for i in range(len(word)))
+
+def _doublec(word: str) -> bool:
+    if len(word) < 2:
+        return False
+    return word[-1] == word[-2] and _cons(word, len(word) - 1)
+
+def _cvc(word: str) -> bool:
+    if len(word) < 3:
+        return False
+    if not _cons(word, -1) or _cons(word, -2) or not _cons(word, -3):
+        return False
+    ch = word[-1]
+    return ch not in "wxy"
+
+def porter_stem(word: str) -> str:
+    w = word
+    if len(w) <= 2:
+        return w
+
+    # Step 1a
+    if w.endswith("sses"):
+        w = w[:-2]
+    elif w.endswith("ies"):
+        w = w[:-2]
+    elif w.endswith("ss"):
+        pass
+    elif w.endswith("s"):
+        w = w[:-1]
+
+    # Step 1b
+    flag = False
+    if w.endswith("eed"):
+        stem = w[:-3]
+        if _m(stem) > 0:
+            w = w[:-1]
+    elif w.endswith("ed"):
+        stem = w[:-2]
+        if _vowel_in_stem(stem):
+            w = stem
+            flag = True
+    elif w.endswith("ing"):
+        stem = w[:-3]
+        if _vowel_in_stem(stem):
+            w = stem
+            flag = True
+    # user's typo variant
+    elif w.endswith("ind"):
+        stem = w[:-3]
+        if _vowel_in_stem(stem):
+            w = stem
+            flag = True
+
+    if flag:
+        if w.endswith(("at", "bl", "iz")):
+            w += "e"
+        elif _doublec(w) and w[-1] not in "lsz":
+            w = w[:-1]
+        elif _m(w) == 1 and _cvc(w):
+            w += "e"
+
+    # Step 1c
+    if w.endswith("y"):
+        stem = w[:-1]
+        if _vowel_in_stem(stem):
+            w = stem + "i"
+
+    # Step 2 (subset)
+    step2 = {
+        "ational": "ate",
+        "tional": "tion",
+        "enci": "ence",
+        "anci": "ance",
+        "izer": "ize",
+        "abli": "able",
+        "alli": "al",
+        "entli": "ent",
+        "eli": "e",
+        "ousli": "ous",
+        "ization": "ize",
+        "ation": "ate",
+        "ator": "ate",
+        "alism": "al",
+        "iveness": "ive",
+        "fulness": "ful",
+        "ousness": "ous",
+        "aliti": "al",
+        "iviti": "ive",
+        "biliti": "ble",
+    }
+    for suf, rep in step2.items():
+        if w.endswith(suf):
+            stem = w[: -len(suf)]
+            if _m(stem) > 0:
+                w = stem + rep
+            break
+
+    # Step 3 (subset)
+    step3 = {
+        "icate": "ic",
+        "ative": "",
+        "alize": "al",
+        "iciti": "ic",
+        "ical": "ic",
+        "ful": "",
+        "ness": "",
+    }
+    for suf, rep in step3.items():
+        if w.endswith(suf):
+            stem = w[: -len(suf)]
+            if _m(stem) > 0:
+                w = stem + rep
+            break
+
+    # Step 4 (very small subset; keep conservative)
+    step4 = ("al", "ance", "ence", "er", "ic", "able", "ible", "ant", "ement", "ment", "ent", "ion", "ou", "ism", "ate", "iti", "ous", "ive", "ize")
+    for suf in step4:
+        if w.endswith(suf):
+            stem = w[: -len(suf)]
+            if suf == "ion":
+                if stem and stem[-1] not in "st":
+                    continue
+            if _m(stem) > 1:
+                w = stem
+            break
+
+    # Step 5a
+    if w.endswith("e"):
+        stem = w[:-1]
+        m = _m(stem)
+        if m > 1 or (m == 1 and not _cvc(stem)):
+            w = stem
+
+    # Step 5b
+    if _m(w) > 1 and _doublec(w) and w.endswith("l"):
+        w = w[:-1]
+
+    return w
+
 def normalize_text(s: str) -> str:
     return (s or "").strip()
 
@@ -40,6 +222,12 @@ def normalize_word(w: str) -> str:
         base = m.group(1)
         # special-case n't -> base already captured (can, don, isn) which is fine; these are stopwords anyway
         w = base
+
+    
+    # Porter-stem simple ASCII words so variants collapse (eat/eating/ate -> eat-ish).
+    # Only stem a-z words; leave numbers/Devanagari as-is.
+    if w and re.fullmatch(r"[a-z]+", w):
+        w = porter_stem(w)
 
     return w
 

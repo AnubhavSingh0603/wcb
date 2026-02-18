@@ -8,15 +8,22 @@ from word_counter_dsc.ui.theme import base_embed
 from word_counter_dsc.utils import safe_allowed_mentions
 
 BOT_DESC = (
-    "**WordCounterBot** tracks server keywords (with common variants) and turns them into a tiny knightly game.\n\n"
+    "**WordCounterBot** tracks *all* words (case-insensitive, punctuation-tolerant, with simple variant normalization),**\n"
+    "but it only shows detailed profile stats for the server's **keywords** list.\n\n"
+    "**Definitions:**\n"
+    "• **Stopwords**: completely ignored + purged (invisible to the bot)\n"
+    "• **Tracked words**: everything else (powering `/top` and `/search`)\n"
+    "• **Keywords**: a subset you add per server (powering `/rank` + profile keyword stats)\n\n"
     "**Commands:**\n"
-    "• `/keyword list` — show tracked keywords (public)\n"
+    "• `/keyword list` — show keywords (public)\n"
     "• `/keyword add` / `/keyword remove` — edit keywords (admin, ephemeral)\n"
-    "• `/keyword abbrev_add` — map abbreviations to phrases that contain tracked keywords\n"
-    "• `/rank <keyword>` — show the leaderboard for that keyword\n"
-    "• `/me` — your profile (titles + stats)\n"
+    "• `/keyword abbrev_add` — map abbreviations to expansions (helps detect intended keywords)\n"
+    "• `/rank <keyword>` — leaderboard for a keyword\n"
+    "• `/search <word>` — leaderboard for any tracked word\n"
+    "• `/top [user]` — top tracked words (server or user)\n"
+    "• `/me` — your profile\n"
     "• `/profile [user]` — someone else's profile\n"
-    "• `/stopword seed|add|remove|list` — controls which common words are ignored for fun stats\n\n"
+    "• `/stopword add|remove|list|seed` — manage stopwords (ignored + purged)\n\n"
     "Tip: Mentions in leaderboards are **clickable but won't ping** anyone."
 )
 
