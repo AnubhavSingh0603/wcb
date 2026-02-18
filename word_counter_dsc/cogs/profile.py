@@ -44,7 +44,11 @@ class ProfileCog(commands.Cog):
 
         # ---- Page 1: Game / medals ----
         e1 = base_embed(f"Profile — {user.display_name}", f"{user_mention(uid)}")
-        e1.set_thumbnail(url=getattr(user.display_avatar, "url", discord.Embed.Empty))
+        # Be defensive across discord.py versions: some environments don't expose Embed.Empty.
+        # Also handle edge cases where display_avatar/url might not exist.
+        thumb_url = getattr(getattr(user, "display_avatar", None), "url", None)
+        if thumb_url:
+            e1.set_thumbnail(url=thumb_url)
         if top_medals:
             lines = []
             for m in top_medals:
