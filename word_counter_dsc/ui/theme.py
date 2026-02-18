@@ -1,36 +1,32 @@
 import discord
 
-
 class Theme:
-    """Royal + minimal theme."""
-
-    BG = 0x0B0F14
-    GOLD = 0xD4AF37
-    BLUE = 0x3B82F6
-    PURPLE = 0x7C3AED
-    EMERALD = 0x10B981
-    CRIMSON = 0xDC2626
-    SLATE = 0x94A3B8
+    # embed colors
+    INFO = 0x5DADE2
+    OK = 0x2ECC71
+    WARN = 0xF1C40F
+    ERR = 0xE74C3C
 
     @staticmethod
-    def medal_color(tier_name: str) -> int:
-        name = (tier_name or "").lower()
-        if name == "squire":
-            return Theme.SLATE
-        if name == "knight":
-            return Theme.BLUE
-        if name == "baron":
-            return Theme.PURPLE
-        if name == "duke":
-            return Theme.GOLD
-        if name == "archduke":
-            return Theme.EMERALD
-        if name == "sovereign":
-            return Theme.CRIMSON
-        return Theme.BLUE
+    def medal_color(rank_name: str) -> int:
+        rank = (rank_name or "").lower()
+        # Knight/royal palette
+        if rank in ("novice",):
+            return 0x95A5A6  # gray
+        if rank in ("squire",):
+            return 0x3498DB  # blue
+        if rank in ("knight",):
+            return 0x2ECC71  # green
+        if rank in ("baron", "count"):
+            return 0x9B59B6  # purple
+        if rank in ("duke",):
+            return 0xF1C40F  # gold
+        if rank in ("prince", "king", "emperor"):
+            return 0xE67E22  # orange
+        return Theme.INFO
 
 
-def base_embed(title: str, description: str | None = None, *, color: int | None = None) -> discord.Embed:
-    e = discord.Embed(title=title, description=description or "", color=color or Theme.BLUE)
-    e.set_footer(text="Word Counter DSC")
+def base_embed(title: str, description: str, color: int = Theme.INFO) -> discord.Embed:
+    e = discord.Embed(title=title, description=description, color=color)
+    e.set_footer(text="WordCounterBot")
     return e
