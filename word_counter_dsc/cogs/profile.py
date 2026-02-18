@@ -1,176 +1,168 @@
-import datetime as dt
 import discord
 from discord.ext import commands
+from discord import app_commands
 
-from word_counter_dsc.config import MEDAL_THRESHOLDS
+from word_counter_dsc.ui.pagination import Paginator
 from word_counter_dsc.ui.theme import base_embed, Theme
-from word_counter_dsc.ui.pagination import PagedEmbedView
-from word_counter_dsc.utils import user_link_no_ping
-
-TIER_BY_NUM = {tier: title for _thr, tier, title in MEDAL_THRESHOLDS}
-
-
-def fmt_ts(ts: int | None) -> str:
-    if not ts:
-        return "—"
-    return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+from word_counter_dsc.utils import (
+    user_link_no_ping,
+    medal_rank_for_count,
+    medal_emoji,
+    medal_title,
+    medal_progress_text,
+    BUILTIN_STOPWORDS,
+)
 
 
 class ProfileCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    async def _top_word(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
-        async with self.bot.db_lock:
-            row = await self.bot.dbx.fetchone(
-                """
-                SELECT word, SUM(count) AS c
-                FROM word_counts
-                WHERE guild_id=? AND user_id=?
-                GROUP BY word
-                ORDER BY c DESC
-                LIMIT 1
-                """,
-                (guild_id, user_id),
-            )
-        if not row:
-            return (None, 0)
-        return (row[0], int(row[1] or 0))
-
-    async def _unique_word(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
-        """
-        A "unique word" here means: used by this user in this server, and never used by anyone else.
-        We return the strongest such word by this user's count.
-        """
-        async with self.bot.db_lock:
-            row = await self.bot.dbx.fetchone(
-                """
-                WITH me AS (
-                    SELECT word, SUM(count) AS myc
-                    FROM word_counts
-                    WHERE guild_id=? AND user_id=?
-                    GROUP BY word
-                ),
-                others AS (
-                    SELECT word, SUM(count) AS oc
-                    FROM word_counts
-                    WHERE guild_id=? AND user_id<>?
-                    GROUP BY word
-                )
-                SELECT me.word, me.myc
-                FROM me
-                LEFT JOIN others ON others.word = me.word
-                WHERE COALESCE(others.oc, 0) = 0
-                ORDER BY me.myc DESC
-                LIMIT 1
-                """,
-                (guild_id, user_id, guild_id, user_id),
-            )
-        if not row:
-            return (None, 0)
-        return (row[0], int(row[1] or 0))
-
-    async def _top_keyword(self, guild_id: int, user_id: int) -> tuple[str | None, int]:
-        async with self.bot.db_lock:
-            row = await self.bot.dbx.fetchone(
-                """
-                SELECT wc.word, SUM(wc.count) AS c
-                FROM word_counts wc
-                JOIN keywords k
-                  ON k.guild_id = wc.guild_id
-                 AND k.keyword = wc.word
-                 AND k.removed_at IS NULL
-                WHERE wc.guild_id=? AND wc.user_id=?
-                GROUP BY wc.word
-                ORDER BY c DESC
-                LIMIT 1
-                """,
-                (guild_id, user_id),
-            )
-        if not row:
-            return (None, 0)
-        return (row[0], int(row[1] or 0))
-
-    async def _medals_summary(self, guild_id: int, user_id: int) -> list[tuple[str, str, int]]:
-        """
-        Returns list of (keyword, tier_title, total_count) for this user,
-        ordered by tier desc then count desc.
-        """
-        async with self.bot.db_lock:
-            rows = await self.bot.dbx.fetchall(
-                """
-                SELECT m.keyword, m.tier, m.total_count
-                FROM keyword_medals m
-                WHERE m.guild_id=? AND m.user_id=?
-                ORDER BY m.tier DESC, m.total_count DESC
-                """,
-                (guild_id, user_id),
-            )
+    async def _top3_keyword_game(self, guild_id: int, user_id: int):
+        rows = await self.bot.dbx.fetch(
+            """
+            SELECT
+                k.keyword AS keyword,
+                COALESCE(SUM(w.count), 0) AS total
+            FROM keywords k
+            LEFT JOIN word_counts w
+              ON w.guild_id = k.guild_id
+             AND w.word = k.keyword
+             AND w.user_id = ?
+            WHERE k.guild_id = ?
+              AND k.is_active = 1
+            GROUP BY k.keyword
+            ORDER BY total DESC, k.keyword ASC
+            LIMIT 3
+            """,
+            user_id,
+            guild_id,
+        )
         out = []
-        for kw, tier, total in rows:
-            out.append((kw, TIER_BY_NUM.get(int(tier), f"Tier {tier}"), int(total or 0)))
+        for r in rows:
+            kw = str(r["keyword"])
+            total = int(r["total"])
+            tier, rank, next_thr = medal_rank_for_count(total)
+            out.append(
+                {"keyword": kw, "total": total, "tier": tier, "rank": rank, "next": next_thr}
+            )
         return out
 
-    async def _render_profile(self, interaction: discord.Interaction, member: discord.Member):
-        gid = interaction.guild.id
-        uid = member.id
-
-        topw, topw_c = await self._top_word(gid, uid)
-        uniqw, uniqw_c = await self._unique_word(gid, uid)
-        topk, topk_c = await self._top_keyword(gid, uid)
-        medals = await self._medals_summary(gid, uid)
-
-        title = f"👤 Profile · {member.display_name}"
-        e = base_embed(title, color=Theme.BLUE)
-        e.set_thumbnail(url=member.display_avatar.url)
-
-        # Quick facts
-        e.add_field(
-            name="Most used word",
-            value=(f"`{topw}` · **{topw_c:,}**" if topw else "—"),
-            inline=True,
+    async def _most_used_word(self, guild_id: int, user_id: int):
+        row = await self.bot.dbx.fetchrow(
+            """
+            SELECT word, SUM(count) AS total
+            FROM word_counts
+            WHERE guild_id = ? AND user_id = ?
+            GROUP BY word
+            ORDER BY total DESC, word ASC
+            LIMIT 1
+            """,
+            guild_id,
+            user_id,
         )
-        e.add_field(
-            name="Most unique word",
-            value=(f"`{uniqw}` · **{uniqw_c:,}**" if uniqw else "—"),
-            inline=True,
+        if not row:
+            return None
+        return str(row["word"]), int(row["total"])
+
+    async def _most_unique_word(self, guild_id: int, user_id: int):
+        # Heuristic: among words used only once, pick the longest
+        rows = await self.bot.dbx.fetch(
+            """
+            SELECT word, SUM(count) AS total
+            FROM word_counts
+            WHERE guild_id = ? AND user_id = ?
+            GROUP BY word
+            HAVING SUM(count) = 1
+            ORDER BY LENGTH(word) DESC, word ASC
+            LIMIT 1
+            """,
+            guild_id,
+            user_id,
         )
-        e.add_field(
-            name="Top keyword",
-            value=(f"`{topk}` · **{topk_c:,}**" if topk else "—"),
-            inline=True,
+        if not rows:
+            return None
+        r = rows[0]
+        return str(r["word"]), int(r["total"])
+
+    def _render_game_lines(self, game_items):
+        if not game_items:
+            return ["No keywords configured yet. Use `/keyword list` to see what's being tracked."]
+        lines = []
+        for it in game_items:
+            kw = it["keyword"]
+            total = it["total"]
+            rank = it["rank"]
+            nxt = it["next"]
+            emoji = medal_emoji(rank)
+            title = medal_title(rank, kw)
+            prog = medal_progress_text(total, nxt)
+            lines.append(f"{emoji} **{title}** — {prog}")
+        return lines
+
+    def _clean_word_for_display(self, w: str) -> str:
+        w = (w or "").strip()
+        if not w:
+            return w
+        if w.lower() in BUILTIN_STOPWORDS:
+            return f"{w} (common word)"
+        return w
+
+    async def _build_profile_pages(self, interaction: discord.Interaction, user: discord.abc.User):
+        assert interaction.guild is not None
+        guild_id = int(interaction.guild.id)
+        user_id = int(user.id)
+
+        game = await self._top3_keyword_game(guild_id, user_id)
+        most_used = await self._most_used_word(guild_id, user_id)
+        most_unique = await self._most_unique_word(guild_id, user_id)
+
+        header = f"{user_link_no_ping(user_id)}"
+
+        # Page 1: Game / medals (top3)
+        lines = self._render_game_lines(game)
+        e1 = base_embed(
+            title="⚔️ Hall of Deeds",
+            description="\n".join([header, "", "**Top keyword titles**", *lines]),
+            color=Theme.INFO,
         )
 
-        # Medal list (paged)
-        if not medals:
-            e.add_field(name="Medals", value="No medals yet.", inline=False)
-            e.set_footer(text=f"User: {user_link_no_ping(uid)}")
-            return await interaction.response.send_message(embed=e, ephemeral=False)
+        # Page 2: Fun facts
+        fact_lines = [header, ""]
+        if most_used:
+            w, c = most_used
+            fact_lines.append(f"**Most used tracked word:** `{self._clean_word_for_display(w)}` (**{c:,}**)")
+        if most_unique:
+            w, _c = most_unique
+            fact_lines.append(f"**Most unique tracked word:** `{w}`")
+        if len(fact_lines) == 2:
+            fact_lines.append("No stats yet — start chatting and I’ll build your profile over time.")
 
-        lines = [f"**{tier}** · `{kw}` · **{total:,}**" for kw, tier, total in medals]
-        pages = []
-        chunk = 10
-        for i in range(0, len(lines), chunk):
-            p = base_embed(title, color=Theme.BLUE)
-            p.set_thumbnail(url=member.display_avatar.url)
-            p.add_field(name="Medals", value="\n".join(lines[i : i + chunk]), inline=False)
-            p.set_footer(text=f"User: {user_link_no_ping(uid)}")
-            pages.append(p)
+        e2 = base_embed(
+            title="📜 Wordcraft Summary",
+            description="\n".join(fact_lines),
+            color=Theme.INFO,
+        )
 
-        view = PagedEmbedView(pages, author_id=interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=False)
+        return [e1, e2]
 
-    @discord.app_commands.command(name="me", description="Show your profile")
+    # ---- Commands ----
+    @app_commands.command(name="me", description="Show your WordCounter profile.")
     async def me(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        await self._render_profile(interaction, interaction.user)
+        await self.userprofile(interaction, user=None)
 
-    @discord.app_commands.command(name="profile", description="Show a user's profile")
-    async def profile(self, interaction: discord.Interaction, user: discord.Member | None = None):
-        if interaction.guild is None:
-            return await interaction.response.send_message("Server only.", ephemeral=True)
-        await self._render_profile(interaction, user or interaction.user)
+    @app_commands.command(name="profile", description="Show a user's WordCounter profile.")
+    @app_commands.describe(user="Optional user to view (defaults to you)")
+    async def userprofile(self, interaction: discord.Interaction, user: discord.Member | None = None):
+        user = user or interaction.user
+        pages = await self._build_profile_pages(interaction, user)
+
+        paginator = Paginator(pages=pages, author_id=interaction.user.id, timeout=60)
+        await paginator.send(
+            interaction,
+            ephemeral=False,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 
 async def setup(bot: commands.Bot):
