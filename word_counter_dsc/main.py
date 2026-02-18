@@ -1,4 +1,3 @@
-# word_counter_dsc/main.py
 from __future__ import annotations
 
 import asyncio
@@ -8,21 +7,9 @@ import os
 import discord
 from discord.ext import commands
 
-# When running this file directly (python word_counter_dsc/main.py) the
-# package may not be on sys.path which causes ModuleNotFoundError. Try the
-# normal absolute imports first and fall back to inserting the project
-# root into sys.path so `word_counter_dsc` can be imported.
-try:
-    from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
-    from word_counter_dsc.database import init_db, Database
-except ModuleNotFoundError:
-    import sys
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root))
-    from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
-    from word_counter_dsc.database import init_db, Database
+from word_counter_dsc.config import REQUIRE_MESSAGE_CONTENT_INTENT, get_bot_token
+from word_counter_dsc.database import init_db
+from word_counter_dsc.stopwords_core import CORE_STOPWORDS
 
 EXTENSIONS = [
     "word_counter_dsc.cogs.tracker",
@@ -46,23 +33,28 @@ class WCBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.guilds = True
-        intents.members = True  # for resolving display names in guild
+        intents.members = True
         intents.messages = True
         intents.message_content = bool(REQUIRE_MESSAGE_CONTENT_INTENT)
 
-        super().__init__(
-            command_prefix="!",
-            intents=intents,
-        )
+        super().__init__(command_prefix="!", intents=intents)
 
-        # a logger attribute (some cogs expect it)
         self.logger = logger
-
-        self.dbx: Database | None = None
+        self.dbx = None  # set in setup_hook
 
     async def setup_hook(self):
         self.dbx = await init_db()
         logger.info("DB initialized: %s", type(self.dbx).__name__)
+
+        # Apply core stopwords maintenance (purges legacy data if core list changed)
+        try:
+            import hashlib
+
+            core_list = sorted(CORE_STOPWORDS)
+            h = hashlib.sha256("\n".join(core_list).encode("utf-8")).hexdigest()
+            await self.dbx.apply_core_stopwords(core_list, h)
+        except Exception:
+            logger.exception("Core stopwords maintenance failed")
 
         for ext in EXTENSIONS:
             try:
@@ -86,7 +78,7 @@ class WCBot(commands.Bot):
 async def main():
     token = get_bot_token().strip()
     if not token:
-        raise RuntimeError("DISCORD_TOKEN (or BOT_TOKEN) env var not set (Render Environment).")
+        raise RuntimeError("DISCORD_TOKEN (or BOT_TOKEN) env var not set.")
 
     bot = WCBot()
     await bot.start(token)

@@ -7,22 +7,13 @@ from discord import app_commands
 from discord.ext import commands
 
 from word_counter_dsc.utils import split_csv_words, safe_allowed_mentions
+from word_counter_dsc.stopwords_core import CORE_STOPWORDS
+
 from word_counter_dsc.ui.theme import base_embed
 
-# A reasonably large default set of common chat filler words.
-# Users can add/remove their own stopwords per-server.
-DEFAULT_STOPWORDS = {
-    "a","an","the","and","or","but","if","then","else","so","because",
-    "i","im","i'm","me","my","mine","you","u","ur","your","yours","we","our","ours",
-    "he","she","they","them","their","theirs","it","its","this","that","these","those",
-    "is","am","are","was","were","be","been","being","do","does","did","doing",
-    "to","of","in","on","at","for","from","with","without","as","by","about","into","over","under",
-    "not","no","yes","yeah","nah","ok","okay","k","kk","lol","lmao","lmfao","rofl",
-    "brb","afk","idk","imo","tbh","btw","omw","rn","fr","ngl","jk","ty","thx","pls","plz",
-    "hi","hey","hello","yo","sup","gg","wp","gl","hf","rip",
-    "like","just","really","very","maybe","literally","actually",
-    "go","going","went","come","came","get","got","make","made","take","took",
-}
+# Core stopwords are built-in and never counted.
+# Server stopwords are extra per-server exclusions.
+EXTRA_STOPWORDS: set[str] = set()
 
 
 class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="Manage stopwords (words ignored for fun stats)"):
@@ -38,15 +29,17 @@ class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="
             "SELECT word FROM stopwords WHERE guild_id=? ORDER BY word ASC",
             (gid,),
         )
-        words = [str(r["word"]) for r in rows]
-        emb = base_embed("Stopwords", "Stopwords are ignored for 'interesting stats' like top words.")
+        server_words = [str(r["word"]) for r in rows]
+        core_words = sorted(CORE_STOPWORDS)
+
+        emb = base_embed("Stopwords", "Core stopwords are built-in and never counted. Server stopwords are extra exclusions for this server.")
         emb.add_field(
-            name=f"Stopwords ({len(words)})",
-            value=("• " + "\n• ".join(words[:120])) if words else "_No stopwords set yet._",
+            name=f"Core stopwords ({len(core_words)})",
+            value=("• " + "\n• ".join(core_words[:120])) if core_words else "_(none)_",
             inline=False,
         )
-        if len(words) > 120:
-            emb.set_footer(text=f"Showing first 120 of {len(words)} stopwords.")
+        if len(core_words) > 120:
+            emb.set_footer(text=f"Showing first 120 core stopwords. Use /stopword list_server for server extras.")
         await interaction.response.send_message(embed=emb, allowed_mentions=safe_allowed_mentions())
 
     @app_commands.command(name="add", description="Add one or more stopwords (comma/space separated).")
@@ -69,6 +62,17 @@ class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="
                 """,
                 (gid, w, now),
             )
+
+        # Purge any existing counts for these stopwords to save DB space (server extras + core are never counted going forward)
+        if getattr(self.bot.dbx, "dialect", "") == "postgres":
+            await self.bot.dbx.execute(
+                "DELETE FROM word_counts WHERE guild_id=? AND word = ANY(?)",
+                (gid, items),
+            )
+        else:
+            q = "DELETE FROM word_counts WHERE guild_id=? AND word IN (" + ",".join(["?"] * len(items)) + ")"
+            await self.bot.dbx.execute(q, (gid, *items))
+
         await interaction.response.send_message(f"Added {len(items)} stopword(s).", ephemeral=True)
 
     @app_commands.command(name="remove", description="Remove one or more stopwords (comma/space separated).")
@@ -91,7 +95,7 @@ class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="
         assert self.bot.dbx is not None
         gid = int(interaction.guild_id or 0)
         now = int(time.time())
-        for w in sorted(DEFAULT_STOPWORDS):
+        for w in sorted(EXTRA_STOPWORDS):
             await self.bot.dbx.execute(
                 """
                 INSERT INTO stopwords (guild_id, word, created_at)
@@ -100,7 +104,7 @@ class StopwordsCog(commands.GroupCog, group_name="stopword", group_description="
                 """,
                 (gid, w, now),
             )
-        await interaction.response.send_message(f"Seeded {len(DEFAULT_STOPWORDS)} default stopwords.", ephemeral=True)
+        await interaction.response.send_message("Core stopwords are built-in. (No server defaults to seed.)", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

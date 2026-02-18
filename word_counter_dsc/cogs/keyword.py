@@ -87,12 +87,20 @@ class KeywordCog(commands.GroupCog, group_name="keyword", group_description="Man
                 "DELETE FROM keywords WHERE guild_id=? AND word=?",
                 (gid, kw),
             )
+            await self.bot.dbx.execute(
+                "DELETE FROM word_counts WHERE guild_id=? AND word=?",
+                (gid, kw),
+            )
+            await self.bot.dbx.execute(
+                "DELETE FROM keyword_medals WHERE guild_id=? AND keyword=?",
+                (gid, kw),
+            )
             # record removal time for cleanup (medals cog)
             await self.bot.dbx.execute(
                 """
                 INSERT INTO keyword_removals (guild_id, word, removed_at)
                 VALUES (?, ?, ?)
-                ON CONFLICT(guild_id, word, removed_at) DO NOTHING
+                ON CONFLICT(guild_id, word) DO UPDATE SET removed_at = excluded.removed_at
                 """,
                 (gid, kw, now),
             )

@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS keyword_medals (
     PRIMARY KEY (guild_id, user_id, word)
 );
 
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS abbreviations (
     guild_id INTEGER NOT NULL,
     abbreviation TEXT NOT NULL,
@@ -104,6 +109,11 @@ CREATE TABLE IF NOT EXISTS keyword_medals (
     total_count BIGINT NOT NULL,
     awarded_at BIGINT NOT NULL,
     PRIMARY KEY (guild_id, user_id, word)
+);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS abbreviations (
@@ -166,7 +176,52 @@ class SQLiteDBX(DBX):
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQLITE)
         await self._conn.commit()
+        await self._migrate_keyword_removals()
         return self
+
+
+    async def _ensure_app_meta(self) -> None:
+        await self.execute("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", ())
+
+    async def _migrate_keyword_removals(self) -> None:
+        # If legacy schema had PRIMARY KEY(guild_id, word, removed_at), migrate to PRIMARY KEY(guild_id, word)
+        rows = await self.fetchall("PRAGMA table_info(keyword_removals)", ())
+        pk_cols = [r["name"] for r in rows if int(r.get("pk", 0)) > 0]
+        if pk_cols == ["guild_id", "word", "removed_at"]:
+            await self.execute(
+                "CREATE TABLE IF NOT EXISTS keyword_removals_new (guild_id INTEGER NOT NULL, word TEXT NOT NULL, removed_at INTEGER NOT NULL, PRIMARY KEY(guild_id, word))",
+                (),
+            )
+            # keep latest removed_at per (guild_id, word)
+            await self.execute(
+                """
+                INSERT OR REPLACE INTO keyword_removals_new (guild_id, word, removed_at)
+                SELECT guild_id, word, MAX(removed_at) AS removed_at
+                FROM keyword_removals
+                GROUP BY guild_id, word
+                """,
+                (),
+            )
+            await self.execute("DROP TABLE keyword_removals", ())
+            await self.execute("ALTER TABLE keyword_removals_new RENAME TO keyword_removals", ())
+
+    async def apply_core_stopwords(self, core_words: list[str], hash_value: str) -> None:
+        # Purge any legacy counted stopwords and keep a hash in app_meta so we only do it when the core list changes.
+        await self._ensure_app_meta()
+        row = await self.fetchone("SELECT value FROM app_meta WHERE key='core_stopwords_hash'", ())
+        if not row or str(row["value"]) != hash_value:
+            # purge
+            if core_words:
+                q = "DELETE FROM word_counts WHERE word IN (" + ",".join(["?"] * len(core_words)) + ")"
+                await self.execute(q, tuple(core_words))
+                q2 = "DELETE FROM keywords WHERE word IN (" + ",".join(["?"] * len(core_words)) + ")"
+                await self.execute(q2, tuple(core_words))
+                q3 = "DELETE FROM stopwords WHERE word IN (" + ",".join(["?"] * len(core_words)) + ")"
+                await self.execute(q3, tuple(core_words))
+            await self.execute(
+                "INSERT OR REPLACE INTO app_meta(key,value) VALUES ('core_stopwords_hash', ?)",
+                (hash_value,),
+            )
 
     def _q(self, sql: str) -> str:
         return sql
@@ -255,6 +310,66 @@ class PostgresDBX(DBX):
                     await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{col}" {typ} NOT NULL DEFAULT 0;')
 
         return self
+
+
+    async def _ensure_app_meta(self) -> None:
+        await self.execute("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)", ())
+
+    async def _migrate_keyword_removals(self) -> None:
+        # Ensure PRIMARY KEY(guild_id, word) on keyword_removals for ON CONFLICT to work reliably.
+        # If a legacy constraint exists, rebuild the table.
+        rows = await self.fetchall(
+            """
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_class c ON c.oid = i.indrelid
+            JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+            WHERE c.relname = 'keyword_removals' AND i.indisprimary
+            ORDER BY array_position(i.indkey, a.attnum)
+            """,
+            (),
+        )
+        pk_cols = [str(r["attname"]) for r in rows] if rows else []
+        if pk_cols and pk_cols != ["guild_id", "word"]:
+            await self.execute(
+                """
+                CREATE TABLE IF NOT EXISTS keyword_removals_new (
+                  guild_id BIGINT NOT NULL,
+                  word TEXT NOT NULL,
+                  removed_at BIGINT NOT NULL,
+                  PRIMARY KEY(guild_id, word)
+                );
+                """,
+                (),
+            )
+            await self.execute(
+                """
+                INSERT INTO keyword_removals_new (guild_id, word, removed_at)
+                SELECT guild_id, word, MAX(removed_at) AS removed_at
+                FROM keyword_removals
+                GROUP BY guild_id, word
+                ON CONFLICT (guild_id, word) DO UPDATE SET removed_at = EXCLUDED.removed_at
+                """,
+                (),
+            )
+            await self.execute("DROP TABLE keyword_removals", ())
+            await self.execute("ALTER TABLE keyword_removals_new RENAME TO keyword_removals", ())
+
+    async def apply_core_stopwords(self, core_words: list[str], hash_value: str) -> None:
+        await self._ensure_app_meta()
+        row = await self.fetchone("SELECT value FROM app_meta WHERE key='core_stopwords_hash'", ())
+        if not row or str(row["value"]) != hash_value:
+            if core_words:
+                await self.execute("DELETE FROM word_counts WHERE word = ANY(?)", (core_words,))
+                await self.execute("DELETE FROM keywords WHERE word = ANY(?)", (core_words,))
+                await self.execute("DELETE FROM stopwords WHERE word = ANY(?)", (core_words,))
+            await self.execute(
+                """
+                INSERT INTO app_meta(key,value) VALUES ('core_stopwords_hash', ?)
+                ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (hash_value,),
+            )
 
     def _q(self, sql: str) -> str:
         # Replace ? -> $1, $2...

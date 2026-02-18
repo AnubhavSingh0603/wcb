@@ -5,27 +5,67 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 ZWSP = "\u200b"
 
-_WORD_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
+import unicodedata
+
+# Token pattern: Latin letters/digits with optional apostrophes, plus Devanagari letters.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*|[\u0900-\u097F]+", re.UNICODE)
+
+# Matches common English contractions that should collapse to the base word.
+# Examples: they'd -> they, he'll -> he, it's -> it, can't -> can (handles n't as 't')
+_CONTRACTION_RE = re.compile(r"^([a-z]+)(?:'(?:d|ll|ve|re|m|s|t))$", re.IGNORECASE)
 
 def normalize_text(s: str) -> str:
-    return (s or "").lower()
+    return (s or "").strip()
+
+def normalize_word(w: str) -> str:
+    """Normalize a token for counting/searching.
+
+    - Unicode normalize (NFKC) + convert curly apostrophes to ASCII '
+    - Case-fold (LOVE/Love/LoVe -> love)
+    - Strip surrounding punctuation/symbols
+    - Collapse common contractions to the base word (they'd -> they)
+    """
+    if not w:
+        return ""
+    w = unicodedata.normalize("NFKC", w)
+    w = w.replace("’", "'").replace("‘", "'")
+    w = w.casefold()
+
+    # strip leading/trailing non-word chars (keep apostrophes inside)
+    w = re.sub(r"^[^\w\u0900-\u097F']+|[^\w\u0900-\u097F']+$", "", w)
+
+    # collapse contractions (latin)
+    m = _CONTRACTION_RE.match(w)
+    if m:
+        base = m.group(1)
+        # special-case n't -> base already captured (can, don, isn) which is fine; these are stopwords anyway
+        w = base
+
+    return w
 
 def tokenize(s: str) -> List[str]:
-    """Tokenize to simple lowercase word-ish tokens."""
+    """Tokenize to normalized tokens (case-insensitive, punctuation-tolerant)."""
     s = normalize_text(s)
-    return _WORD_RE.findall(s)
-
-def split_csv_words(s: str) -> List[str]:
-    """Split a user input string into words: supports commas/newlines/spaces."""
     if not s:
         return []
-    # allow: "a, b  c\n d"
-    parts = re.split(r"[\s,]+", s.strip())
-    out = []
+    s = unicodedata.normalize("NFKC", s).replace("’", "'").replace("‘", "'")
+    raw = _TOKEN_RE.findall(s)
+    out: List[str] = []
+    for t in raw:
+        nt = normalize_word(t)
+        if nt:
+            out.append(nt)
+    return out
+def split_csv_words(s: str) -> List[str]:
+    """Split a user input string into normalized words (comma/space/newline separated)."""
+    if not s:
+        return []
+    parts = re.split(r"[\s,]+", (s or "").strip())
+    out: List[str] = []
     for p in parts:
-        p = p.strip().lower()
-        if p:
-            out.append(p)
+        w = normalize_word(p)
+        if w:
+            out.append(w)
     return out
 
 def keyword_display(keyword: str) -> str:
@@ -62,11 +102,22 @@ def build_keyword_regex(keyword: str, aliases: Sequence[str] | None = None) -> r
     return re.compile(pat, re.IGNORECASE)
 
 def count_keyword_occurrences(message: str, keyword: str, aliases: Sequence[str] | None = None) -> int:
-    """Count occurrences of keyword variants in a raw message."""
+    """Count occurrences of keyword variants in a message.
+
+    Uses normalized token stream so counts are case-insensitive and punctuation-tolerant.
+    """
     if not message or not keyword:
         return 0
-    rx = build_keyword_regex(keyword, aliases=aliases)
-    return sum(1 for _ in rx.finditer(message))
+
+    # Normalize message into tokens, then join with spaces to make boundary matching consistent.
+    norm_text = " ".join(tokenize(message))
+    if not norm_text:
+        return 0
+
+    kw = normalize_word(keyword)
+    alias_norm = [normalize_word(a) for a in (aliases or []) if normalize_word(a)]
+    rx = build_keyword_regex(kw, aliases=alias_norm)
+    return sum(1 for _ in rx.finditer(norm_text))
 
 def user_mention(user_id: int) -> str:
     """Return a mention string. Use AllowedMentions.none() when sending to avoid pings."""

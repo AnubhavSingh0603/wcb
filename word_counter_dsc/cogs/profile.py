@@ -7,6 +7,8 @@ from discord.ext import commands
 from word_counter_dsc.utils import safe_allowed_mentions, user_mention, progress_bar
 from word_counter_dsc.ui.pagination import Paginator
 from word_counter_dsc.ui.theme import base_embed
+from word_counter_dsc.stopwords_core import CORE_STOPWORDS
+
 
 # NOTE:
 #   /me      -> your own profile
@@ -31,7 +33,7 @@ class ProfileCog(commands.Cog):
             """,
             (guild_id, uid),
         )
-        kw_totals = [(r["keyword"], int(r["total"])) for r in rows if int(r["total"]) > 0]
+        kw_totals = [(r["keyword"], int(r["total"])) for r in rows if int(r["total"]) > 0 and str(r["keyword"]) not in CORE_STOPWORDS]
         distinct_kw = len(kw_totals)
         top_kw = kw_totals[0] if kw_totals else None
         rare_kw = kw_totals[-1] if kw_totals else None
@@ -86,18 +88,20 @@ class ProfileCog(commands.Cog):
 
     @app_commands.command(name="me", description="Show your profile.")
     async def me(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
         gid = int(interaction.guild_id or 0)
         embeds = await self._build_profile_embeds(gid, interaction.user)
         view = Paginator(embeds, author_id=int(interaction.user.id))
-        await interaction.response.send_message(embed=view.first_embed(), view=view, allowed_mentions=safe_allowed_mentions())
+        await interaction.followup.send(embed=view.first_embed(), view=view, allowed_mentions=safe_allowed_mentions())
 
     @app_commands.command(name="profile", description="Show a user's profile (defaults to you).")
     async def profile(self, interaction: discord.Interaction, user: discord.User | None = None):
+        await interaction.response.defer(thinking=True)
         gid = int(interaction.guild_id or 0)
         user = user or interaction.user
         embeds = await self._build_profile_embeds(gid, user)
         view = Paginator(embeds, author_id=int(interaction.user.id))
-        await interaction.response.send_message(embed=view.first_embed(), view=view, allowed_mentions=safe_allowed_mentions())
+        await interaction.followup.send(embed=view.first_embed(), view=view, allowed_mentions=safe_allowed_mentions())
 
 
 async def setup(bot: commands.Bot):

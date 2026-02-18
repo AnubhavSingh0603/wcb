@@ -18,7 +18,7 @@ class SearchCog(commands.Cog):
     async def rank(self, interaction: discord.Interaction, keyword: str, top_n: int | None = None):
         assert self.bot.dbx is not None
         gid = int(interaction.guild_id or 0)
-        kw = (keyword or "").strip().lower()
+        kw = normalize_word(keyword)
         n = int(top_n or DEFAULT_TOP_N)
         n = max(1, min(n, 25))
 
@@ -57,7 +57,7 @@ class SearchCog(commands.Cog):
                 lines.append(f"**{i}.** {user_mention(uid)} — **{total}**")
             emb.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
 
-        await interaction.response.send_message(embed=emb, allowed_mentions=safe_allowed_mentions())
+        await interaction.followup.send(embed=emb, allowed_mentions=safe_allowed_mentions())
 
 
 async def setup(bot: commands.Bot):
