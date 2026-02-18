@@ -1,86 +1,85 @@
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
+ZWSP = "\u200b"
 
-WORD_RE = re.compile(r"[A-Za-z0-9']+")
+_WORD_RE = re.compile(r"[a-z0-9']+", re.IGNORECASE)
 
+def normalize_text(s: str) -> str:
+    return (s or "").lower()
 
-def tokenize(text: str) -> List[str]:
-    if not text:
+def tokenize(s: str) -> List[str]:
+    """Tokenize to simple lowercase word-ish tokens."""
+    s = normalize_text(s)
+    return _WORD_RE.findall(s)
+
+def split_csv_words(s: str) -> List[str]:
+    """Split a user input string into words: supports commas/newlines/spaces."""
+    if not s:
         return []
-    return [m.group(0).lower() for m in WORD_RE.finditer(text)]
+    # allow: "a, b  c\n d"
+    parts = re.split(r"[\s,]+", s.strip())
+    out = []
+    for p in parts:
+        p = p.strip().lower()
+        if p:
+            out.append(p)
+    return out
 
+def keyword_display(keyword: str) -> str:
+    """Pretty keyword for UI."""
+    if not keyword:
+        return ""
+    # Title-case but keep common acronyms readable
+    if keyword.isupper():
+        return keyword
+    return keyword[:1].upper() + keyword[1:].lower()
 
-def user_mention(user_id: int, display_name: str | None = None) -> str:
-    """Clickable profile link without pinging the user."""
-    name = (display_name or f"User {user_id}").replace("[", "(").replace("]", ")")
-    return f"[{name}](https://discord.com/users/{user_id})"
-
-
-# ---------------- Medal helpers ----------------
-
-# Rank names are used by medals/game
-RANKS = [
-    "Peasant",
-    "Squire",
-    "Baron",
-    "Viscount",
-    "Count",
-    "Marquess",
-    "Duke",
-    "Prince",
-    "King",
-    "Emperor",
-]
-
-
-def medal_rank_for_count(total: int, thresholds: List[Tuple[int, int, str]]) -> Tuple[int, str]:
+def build_keyword_regex(keyword: str, aliases: Sequence[str] | None = None) -> re.Pattern:
     """
-    thresholds: list of (count_threshold, tier, rank_name)
-    returns: (tier, rank_name)
+    Build a regex to match:
+      - keyword at token boundary (non-alnum before)
+      - then optional letters (for simple suffixes: plural/verb forms)
+      - stop on non-letter
+    This catches:
+      'fuck', 'fucks', 'fucking', 'abso-fucking-lutely'
+    But tries to avoid matching inside other words like 'pass' for 'ass'
+    by requiring a non-alnum boundary before the root.
     """
-    best_tier = 0
-    best_rank = ""
-    for threshold, tier, rank in thresholds:
-        if total >= threshold and tier > best_tier:
-            best_tier = tier
-            best_rank = rank
-    return best_tier, best_rank
+    kw = re.escape(keyword.lower())
+    alts = [kw]
+    if aliases:
+        for a in aliases:
+            a = a.strip().lower()
+            if a:
+                alts.append(re.escape(a))
+    group = "(?:" + "|".join(sorted(set(alts), key=len, reverse=True)) + ")"
+    # boundary before: not a letter/digit
+    # after: allow letters for inflections, then require next char not a letter
+    pat = rf"(?<![a-z0-9]){group}[a-z]*"
+    return re.compile(pat, re.IGNORECASE)
 
+def count_keyword_occurrences(message: str, keyword: str, aliases: Sequence[str] | None = None) -> int:
+    """Count occurrences of keyword variants in a raw message."""
+    if not message or not keyword:
+        return 0
+    rx = build_keyword_regex(keyword, aliases=aliases)
+    return sum(1 for _ in rx.finditer(message))
 
-def medal_emoji(rank: str) -> str:
-    # Simple mapping; you can expand later
-    mapping = {
-        "Peasant": "🥔",
-        "Squire": "🛡️",
-        "Baron": "🏰",
-        "Viscount": "⚔️",
-        "Count": "🦁",
-        "Marquess": "👑",
-        "Duke": "🐉",
-        "Prince": "✨",
-        "King": "👑",
-        "Emperor": "🌟",
-    }
-    return mapping.get(rank, "🏅")
+def user_mention(user_id: int) -> str:
+    """Return a mention string. Use AllowedMentions.none() when sending to avoid pings."""
+    return f"<@{int(user_id)}>"
 
+def safe_allowed_mentions():
+    import discord
+    return discord.AllowedMentions.none()
 
-def medal_title(word: str, rank: str) -> str:
-    # Keep it “The <rank> of <Word>”
-    w = (word or "").strip()
-    w = w[:1].upper() + w[1:] if w else word
-    return f"The {rank} of {w}"
-
-
-def medal_progress_text(total: int, thresholds: List[Tuple[int, int, str]]) -> str:
-    # Find next threshold after total
-    next_thr = None
-    for thr, tier, rank in sorted(thresholds, key=lambda x: x[0]):
-        if thr > total:
-            next_thr = thr
-            break
-    if next_thr is None:
-        return f"{total}/∞"
-    return f"{total}/{next_thr}"
+def progress_bar(curr: int, target: int, width: int = 12) -> str:
+    if target <= 0:
+        return "█" * width
+    curr = max(0, min(curr, target))
+    filled = int(round(width * (curr / target)))
+    filled = min(width, max(0, filled))
+    return "█" * filled + "░" * (width - filled)

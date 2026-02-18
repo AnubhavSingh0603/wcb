@@ -244,3 +244,7 @@ async def init_db(url: str, sqlite_path: str = "word_counts.db") -> DBX:
     if is_pg:
         return await PostgresDBX(url=url).init()
     return await SQLiteDBX(sqlite_path=sqlite_path).init()
+
+
+# Backwards-compat: older code imports Database from this module.
+Database = DBX

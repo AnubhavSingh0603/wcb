@@ -1,108 +1,73 @@
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
-# ------------------------
-# Logging
-# ------------------------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# =========================
+# Secrets / environment
+# =========================
+# Put these in Render "Environment" (or a local .env), NOT in code:
+#   DISCORD_TOKEN=...
+#   DATABASE_URL=...
+#
+# BOT_TOKEN is kept for backwards-compat with older code paths.
+BOT_TOKEN = os.getenv("DISCORD_TOKEN", "") or os.getenv("BOT_TOKEN", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-# ------------------------
-# Discord Token
-# ------------------------
-# Primary expected key on Render:
-#   DISCORD_TOKEN
-# Backward compatible fallbacks:
-#   BOT_TOKEN, DISCORD_BOT_TOKEN, TOKEN
-BOT_TOKEN = (
-    os.getenv("DISCORD_TOKEN", "")
-    or os.getenv("BOT_TOKEN", "")
-    or os.getenv("DISCORD_BOT_TOKEN", "")
-    or os.getenv("TOKEN", "")
-)
+# =========================
+# Bot behavior
+# =========================
+# Counting requires the privileged "Message Content Intent" enabled in the Discord Developer Portal.
+# If you can't enable it, set this to "0" in env to run the bot without message counting.
+REQUIRE_MESSAGE_CONTENT_INTENT = os.getenv("REQUIRE_MESSAGE_CONTENT_INTENT", "1").strip() not in ("0", "false", "False")
 
-# ------------------------
-# Counting mode
-# ------------------------
-# UNIQUE: count a word at most once per message
-# ALL: count repeated occurrences within the same message
-COUNT_MODE = os.getenv("COUNT_MODE", "UNIQUE").upper()
-if COUNT_MODE not in ("UNIQUE", "ALL"):
-    COUNT_MODE = "UNIQUE"
-
-# ------------------------
-# Database
-# ------------------------
-# sqlite (local) or postgres (hosted)
-DB_DIALECT = os.getenv("DB_DIALECT", "sqlite").lower()
-
-# sqlite path
-DB_PATH = os.getenv("DB_PATH", "word_counts.db")
-
-# postgres url (Render/Neon/etc)
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-
-# ------------------------
-# Backfill controls
-# ------------------------
-AUTO_BACKFILL_ENABLED = os.getenv("AUTO_BACKFILL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-BACKFILL_LIMIT_PER_CHANNEL = int(os.getenv("BACKFILL_LIMIT_PER_CHANNEL", "200"))
-
-# ------------------------
-# Intents warning
-# ------------------------
-REQUIRE_MESSAGE_CONTENT_INTENT = True
-
-# ------------------------
-# Search defaults
-# ------------------------
+# Default pagination / leaderboard sizes
 DEFAULT_TOP_N = int(os.getenv("DEFAULT_TOP_N", "10"))
 
-# ------------------------
-# Keyword removal grace (seconds)
-# ------------------------
-# When a keyword is removed, we keep its medal table entry for a short while
-# so queries don't flicker while moderators are editing the list.
-KEYWORD_REMOVAL_GRACE_SECONDS = int(os.getenv("KEYWORD_REMOVAL_GRACE_SECONDS", str(7 * 24 * 3600)))  # 7 days
+# =========================
+# Keyword matching rules
+# =========================
+# How aggressive to be when matching inside words (e.g., "abso-fucking-lutely").
+# 0 = only whole tokens
+# 1 = allow inside-word matches with safe boundaries (recommended)
+MATCH_MODE = int(os.getenv("MATCH_MODE", "1"))
 
-# ------------------------
-# Extensions
-# ------------------------
-EXTENSIONS = [
-    "word_counter_dsc.cogs.tracker",
-    "word_counter_dsc.cogs.search",
-    "word_counter_dsc.cogs.keyword",
-    "word_counter_dsc.cogs.stopwords",
-    "word_counter_dsc.cogs.help_cmd",
-    "word_counter_dsc.cogs.medals",
-    "word_counter_dsc.cogs.profile",
-]
-
-# ------------------------
-# Medal thresholds (keyword game)
-# ------------------------
-# (min_count, tier_number, rank_name)
-# rank_name is the *rank* (Squire/Baron/etc). The final displayed title is
-# generated from rank + keyword (e.g., "🏰 The Baron of Fuck").
-MEDAL_THRESHOLDS = [
-    (10,   1, "Novice"),
-    (25,   2, "Squire"),
-    (50,   3, "Knight"),
-    (100,  4, "Baron"),
-    (250,  5, "Count"),
-    (500,  6, "Duke"),
-    (1000, 7, "Prince"),
-    (2500, 8, "King"),
-    (5000, 9, "Emperor"),
-]
-
-# Emoji per rank (used in /profile + medal unlock messages)
-MEDAL_EMOJIS = {
-    "novice": "📜",
-    "squire": "✨",
-    "knight": "🛡️",
-    "baron": "🏰",
-    "count": "📯",
-    "duke": "⚔️",
-    "prince": "👑",
-    "king": "👑",
-    "emperor": "👑",
+# Optional extra aliases for specific keywords (lowercase).
+# Example: for keyword "fuck" include slang variants.
+KEYWORD_ALIASES: Dict[str, List[str]] = {
+    "fuck": ["fucks", "fucking", "fuckin", "fuckity", "wtf", "tf"],
 }
+
+# =========================
+# Stopwords
+# =========================
+# Built-in stopwords are in cogs/stopwords.py (user can add more via commands).
+
+# =========================
+# Medals / game
+# =========================
+# Tier thresholds for "how many times you used a keyword".
+MEDAL_THRESHOLDS: List[int] = [25, 50, 100, 250, 500, 1000, 2500, 5000]
+
+# Cooldown after removing a keyword before medal cleanup (seconds)
+KEYWORD_REMOVAL_GRACE_SECONDS = int(os.getenv("KEYWORD_REMOVAL_GRACE_SECONDS", "3600"))
+
+# Emoji per tier (index aligned with MEDAL_THRESHOLDS)
+MEDAL_EMOJIS: List[str] = ["🥉", "🥈", "🥇", "🏅", "🎖️", "👑", "⚔️", "🏰"]
+
+# Title templates (keyword is injected as Title-cased / upper where needed)
+# Keep it quirky + royal/knight themed.
+TITLE_TEMPLATES: List[str] = [
+    "Squire of {K}",
+    "Knight of {K}",
+    "Baron of {K}",
+    "Count of {K}",
+    "Duke of {K}",
+    "Archduke of {K}",
+    "High King of {K}",
+    "Mythic Sovereign of {K}",
+]
+
+def get_bot_token() -> str:
+    return BOT_TOKEN

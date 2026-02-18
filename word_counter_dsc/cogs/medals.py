@@ -1,131 +1,161 @@
 from __future__ import annotations
 
-import logging
 import time
-
 import discord
 from discord.ext import commands
 
-from word_counter_dsc.config import MEDAL_THRESHOLDS, KEYWORD_REMOVAL_GRACE_SECONDS
-from word_counter_dsc.utils import (
-    tokenize,
-    medal_rank_for_count,
-    medal_emoji,
-    medal_title,
-    medal_progress_text,
+from word_counter_dsc.config import (
+    MEDAL_THRESHOLDS,
+    MEDAL_EMOJIS,
+    TITLE_TEMPLATES,
+    KEYWORD_REMOVAL_GRACE_SECONDS,
 )
+from word_counter_dsc.utils import keyword_display, progress_bar
+
+def tier_for_count(n: int) -> int:
+    """Return tier index based on MEDAL_THRESHOLDS. -1 means no tier yet."""
+    for i, thr in enumerate(MEDAL_THRESHOLDS):
+        if n < thr:
+            return i - 1
+    return len(MEDAL_THRESHOLDS) - 1
+
+def next_threshold(n: int) -> int | None:
+    for thr in MEDAL_THRESHOLDS:
+        if n < thr:
+            return thr
+    return None
+
+def title_for(keyword: str, tier: int) -> str:
+    k = keyword_display(keyword)
+    if tier < 0:
+        return f"Page of {k}"
+    idx = min(tier, len(TITLE_TEMPLATES) - 1)
+    return TITLE_TEMPLATES[idx].format(K=k)
+
+def emoji_for(tier: int) -> str:
+    if tier < 0:
+        return "📜"
+    idx = min(tier, len(MEDAL_EMOJIS) - 1)
+    return MEDAL_EMOJIS[idx]
 
 
 class MedalsCog(commands.Cog):
+    """Awards knight/royal themed titles based on keyword usage."""
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.thresholds = MEDAL_THRESHOLDS
-
-    @property
-    def log(self) -> logging.Logger:
-        return getattr(self.bot, "logger", None) or logging.getLogger("word_counter_dsc")
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # Cleanup medals for long-removed keywords (tidy DB)
+        # Cleanup medal rows for keywords removed long ago
+        if not self.bot.dbx:
+            return
+        now = int(time.time())
+        cutoff = now - int(KEYWORD_REMOVAL_GRACE_SECONDS)
+
         try:
-            cutoff = int(time.time()) - int(KEYWORD_REMOVAL_GRACE_SECONDS)
-            await self.bot.dbx.execute(
-                """
-                DELETE FROM keyword_medals
-                WHERE (guild_id, word) IN (
-                    SELECT kr.guild_id, kr.word
-                    FROM keyword_removals kr
-                    LEFT JOIN keywords k
-                      ON k.guild_id = kr.guild_id AND k.word = kr.word
-                    WHERE k.word IS NULL AND kr.removed_at < ?
-                )
-                """,
+            removals = await self.bot.dbx.fetchall(
+                "SELECT guild_id, keyword FROM keyword_removals WHERE removed_at <= ?",
                 (cutoff,),
             )
+            for r in removals:
+                await self.bot.dbx.execute(
+                    "DELETE FROM keyword_medals WHERE guild_id=? AND keyword=?",
+                    (int(r["guild_id"]), r["keyword"]),
+                )
+                await self.bot.dbx.execute(
+                    "DELETE FROM keyword_removals WHERE guild_id=? AND keyword=?",
+                    (int(r["guild_id"]), r["keyword"]),
+                )
         except Exception:
-            self.log.exception("Medals cleanup failed")
+            self.bot.logger.exception("Medals cleanup failed")
 
-    async def _get_best_tier(self, guild_id: int, user_id: int, word: str) -> int:
+    async def update_user_keyword(self, guild_id: int, user_id: int, keyword: str):
+        """Recompute total count and upsert medal tier if changed."""
+        assert self.bot.dbx is not None
+
         row = await self.bot.dbx.fetchone(
-            "SELECT tier FROM keyword_medals WHERE guild_id=? AND user_id=? AND word=?",
-            (guild_id, user_id, word),
+            "SELECT COALESCE(SUM(count), 0) AS total FROM word_counts WHERE guild_id=? AND user_id=? AND word=?",
+            (guild_id, user_id, keyword),
         )
-        if not row:
-            return 0
-        return int(row[0])
+        total = int(row["total"] if row else 0)
+        tier = tier_for_count(total)
 
-    async def _set_medal(self, guild_id: int, user_id: int, word: str, tier: int, total_count: int) -> None:
+        existing = await self.bot.dbx.fetchone(
+            "SELECT tier FROM keyword_medals WHERE guild_id=? AND user_id=? AND keyword=?",
+            (guild_id, user_id, keyword),
+        )
+        old_tier = int(existing["tier"]) if existing else -1
+
+        if tier == old_tier:
+            return
+
         await self.bot.dbx.execute(
             """
-            INSERT INTO keyword_medals (guild_id, user_id, word, tier, total_count, awarded_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT (guild_id, user_id, word)
-            DO UPDATE SET tier=EXCLUDED.tier, total_count=EXCLUDED.total_count, awarded_at=EXCLUDED.awarded_at
+            INSERT INTO keyword_medals (guild_id, user_id, keyword, tier, earned_at)
+            VALUES (?, ?, ?, ?, strftime('%s','now'))
+            ON CONFLICT(guild_id, user_id, keyword) DO UPDATE SET tier=excluded.tier
             """,
-            (guild_id, user_id, word, int(tier), int(total_count), int(time.time())),
+            (guild_id, user_id, keyword, tier),
         )
-
-    async def _recently_removed(self, guild_id: int, word: str) -> bool:
-        cutoff = int(time.time()) - int(KEYWORD_REMOVAL_GRACE_SECONDS)
-        row = await self.bot.dbx.fetchone(
-            "SELECT 1 FROM keyword_removals WHERE guild_id=? AND word=? AND removed_at >= ?",
-            (guild_id, word, cutoff),
-        )
-        return bool(row)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        if message.author.bot or not message.guild:
             return
-        if not message.guild or not message.content:
-            return
-
-        guild_id = message.guild.id
-        user_id = message.author.id
-
-        tokens = tokenize(message.content)
-        if not tokens:
+        if not self.bot.dbx:
             return
 
-        kws = await self.bot.dbx.fetchall("SELECT word FROM keywords WHERE guild_id=?", (guild_id,))
-        tracked = {str(r[0]) for r in kws}
-        if not tracked:
+        gid = int(message.guild.id)
+        uid = int(message.author.id)
+
+        # Quick path: only update medals for keywords that appear in this message
+        kw_rows = await self.bot.dbx.fetchall(
+            "SELECT keyword FROM keywords WHERE guild_id=?",
+            (gid,),
+        )
+        keywords = [r["keyword"] for r in kw_rows]
+        if not keywords:
             return
 
-        hit_words = {t for t in tokens if t in tracked}
-        if not hit_words:
-            return
+        text = (message.content or "").lower()
+        hits = [kw for kw in keywords if kw in text]  # cheap prefilter
+        for kw in hits[:10]:
+            await self.update_user_keyword(gid, uid, kw)
 
-        for w in hit_words:
-            if await self._recently_removed(guild_id, w):
-                continue
-
-            row = await self.bot.dbx.fetchone(
-                "SELECT COALESCE(SUM(count),0) FROM word_counts WHERE guild_id=? AND user_id=? AND word=?",
-                (guild_id, user_id, w),
+    async def top_medals_for_user(self, guild_id: int, user_id: int, limit: int = 3):
+        assert self.bot.dbx is not None
+        rows = await self.bot.dbx.fetchall(
+            """
+            SELECT km.keyword, km.tier,
+                   COALESCE(SUM(wc.count), 0) AS total
+            FROM keyword_medals km
+            LEFT JOIN word_counts wc
+              ON wc.guild_id=km.guild_id AND wc.user_id=km.user_id AND wc.word=km.keyword
+            WHERE km.guild_id=? AND km.user_id=?
+            GROUP BY km.keyword, km.tier
+            ORDER BY total DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        )
+        out = []
+        for r in rows:
+            kw = r["keyword"]
+            tier = int(r["tier"])
+            total = int(r["total"])
+            nxt = next_threshold(total)
+            out.append(
+                dict(
+                    keyword=kw,
+                    tier=tier,
+                    total=total,
+                    next=nxt,
+                    title=title_for(kw, tier),
+                    emoji=emoji_for(tier),
+                )
             )
-            total = int(row[0]) if row and row[0] is not None else 0
-
-            tier, rank = medal_rank_for_count(total, self.thresholds)
-            if tier <= 0:
-                continue
-
-            prev = await self._get_best_tier(guild_id, user_id, w)
-            if tier <= prev:
-                continue
-
-            await self._set_medal(guild_id, user_id, w, tier, total)
-
-            title = medal_title(w, rank)
-            emoji = medal_emoji(rank)
-            progress = medal_progress_text(total, self.thresholds)
-
-            msg = f"{emoji} **{title}** — {message.author.display_name} reached **{rank}** for **{w}** ({progress})"
-            try:
-                await message.channel.send(msg, allowed_mentions=discord.AllowedMentions.none())
-            except Exception:
-                pass
+        return out
 
 
 async def setup(bot: commands.Bot):

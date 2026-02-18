@@ -1,74 +1,40 @@
 from __future__ import annotations
 
 import discord
+from discord import ui
+from typing import List, Optional
 
+class Paginator(ui.View):
+    """Simple button paginator for a list of embeds."""
 
-class PagedEmbedView(discord.ui.View):
-    """
-    Simple Prev/Next embed paginator.
-    """
-
-    def __init__(self, embeds: list[discord.Embed], author_id: int, timeout: float = 120):
+    def __init__(self, embeds: List[discord.Embed], author_id: int, timeout: float = 120.0):
         super().__init__(timeout=timeout)
         self.embeds = embeds
         self.author_id = author_id
-        self.i = 0
+        self.index = 0
         self._sync_buttons()
+
+    def _sync_buttons(self):
+        self.prev_btn.disabled = (self.index <= 0)
+        self.next_btn.disabled = (self.index >= len(self.embeds) - 1)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user is not None and interaction.user.id == self.author_id
+        if interaction.user and interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message("Only the command invoker can use these buttons.", ephemeral=True)
+        return False
 
-    def _sync_buttons(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                if item.label == "Prev":
-                    item.disabled = self.i <= 0
-                elif item.label == "Next":
-                    item.disabled = self.i >= len(self.embeds) - 1
-
-    async def on_timeout(self) -> None:
-        for item in self.children:
-            if isinstance(item, discord.ui.Button):
-                item.disabled = True
-
-    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.i = max(0, self.i - 1)
+    @ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: ui.Button):
+        self.index = max(0, self.index - 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.embeds[self.i], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.i = min(len(self.embeds) - 1, self.i + 1)
+    @ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: ui.Button):
+        self.index = min(len(self.embeds) - 1, self.index + 1)
         self._sync_buttons()
-        await interaction.response.edit_message(embed=self.embeds[self.i], view=self)
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
 
-
-class Paginator:
-    """
-    Backwards-compatible wrapper expected by cogs.
-    """
-
-    def __init__(self, pages: list[discord.Embed], author_id: int, timeout: float = 120):
-        self.pages = pages
-        self.author_id = author_id
-        self.timeout = timeout
-
-    async def send(
-        self,
-        interaction: discord.Interaction,
-        *,
-        ephemeral: bool = False,
-        allowed_mentions: discord.AllowedMentions | None = None,
-    ) -> None:
-        view = None
-        embed = self.pages[0] if self.pages else discord.Embed(description="(no pages)")
-        if len(self.pages) > 1:
-            view = PagedEmbedView(self.pages, author_id=self.author_id, timeout=self.timeout)
-
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, view=view, ephemeral=ephemeral, allowed_mentions=allowed_mentions)
-        else:
-            await interaction.response.send_message(
-                embed=embed, view=view, ephemeral=ephemeral, allowed_mentions=allowed_mentions
-            )
+    def first_embed(self) -> discord.Embed:
+        return self.embeds[self.index]
